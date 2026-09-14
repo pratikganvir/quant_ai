@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local data
+data/
+*.parquet
+*.csv
+*.feather
+
+# Results
+results/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Python build
+build/
+dist/
+*.egg-info/
+
+# Temporary
+tmp/
+temp/

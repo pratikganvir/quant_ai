@@ -103,9 +103,10 @@ run_as_user() {
 
 echo "==> Installing Python dependencies"
 run_as_user "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
-REQ_FILTERED="$(mktemp)"
-trap 'rm -f "${REQ_FILTERED}"' EXIT
+REQ_FILTERED="${VENV_DIR}/requirements.linux.txt"
 grep -v -E '^(appnope([=<>~!]|$)|#|$)' "${PROJECT_ROOT}/requirements.txt" > "${REQ_FILTERED}"
+chown "${TARGET_USER}:${TARGET_USER}" "${REQ_FILTERED}"
+chmod 644 "${REQ_FILTERED}"
 run_as_user "${VENV_DIR}/bin/pip" install -r "${REQ_FILTERED}"
 run_as_user "${VENV_DIR}/bin/pip" install -e "${PROJECT_ROOT}"
 

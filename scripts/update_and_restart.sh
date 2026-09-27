@@ -61,9 +61,11 @@ else
 fi
 
 echo "==> Refreshing Python dependencies"
-REQ_FILTERED="$(mktemp)"
-trap 'rm -f "${REQ_FILTERED}"' EXIT
+REQ_FILTERED="${VENV_DIR}/requirements.linux.txt"
 grep -v -E '^(appnope([=<>~!]|$)|#|$)' "${PROJECT_ROOT}/requirements.txt" > "${REQ_FILTERED}"
+if [[ "${EUID}" -eq 0 ]]; then
+  chown "${TARGET_USER}:${TARGET_USER}" "${REQ_FILTERED}"
+fi
 chmod 644 "${REQ_FILTERED}"
 run_repo "${VENV_DIR}/bin/pip" install -r "${REQ_FILTERED}"
 run_repo "${VENV_DIR}/bin/pip" install -e "${PROJECT_ROOT}"

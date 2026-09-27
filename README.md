@@ -13,18 +13,24 @@ Quantitative research and backtesting framework for Indian equities.
 
 ## Data
 
-Large historical market datasets are stored separately on Google Drive.
+Large historical market datasets live on the VM, not in git.
 
-Expected Google Drive location:
+Default location:
 
-`/content/drive/MyDrive/quant/data/`
+`/home/pratik/data/quant_ai`
+
+Expected layout (same as the old Drive `quant/data` tree):
+
+- `parquet/` — stock OHLCV Parquet files
+- `indices/nifty50/NIFTY50.parquet`
+- `results/` — research outputs
+
+Override with `QUANT_DATA_DIR` if needed. `scripts/setup_ubuntu.sh` exports that into the Jupyter systemd service and symlinks `data/` in the repo to this folder.
 
 ## Research workflow
 
 1. Develop strategy/code locally in VS Code.
 2. Run unit tests locally.
 3. Push code to GitHub.
-4. Pull code into Google Colab.
-5. Mount Google Drive.
-6. Run large-scale backtests.
-7. Save results to Google Drive.
+4. Pull and restart on the VM with `scripts/update_and_restart.sh`.
+5. Run notebooks in Jupyter at port 8888 against `/home/pratik/data/quant_ai`.

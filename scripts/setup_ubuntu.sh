@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVICE_NAME="quant-jupyter"
 JUPYTER_PORT="${JUPYTER_PORT:-8888}"
+QUANT_DATA_DIR="${QUANT_DATA_DIR:-/home/pratik/data/quant_ai}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This script is for Ubuntu Linux VMs." >&2
@@ -28,7 +29,7 @@ fi
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Re-running with sudo..."
-  exec sudo --preserve-env=JUPYTER_PASSWORD,JUPYTER_PORT,DEBIAN_FRONTEND "$0" "$@"
+  exec sudo --preserve-env=JUPYTER_PASSWORD,JUPYTER_PORT,QUANT_DATA_DIR,DEBIAN_FRONTEND "$0" "$@"
 fi
 
 TARGET_USER="${SUDO_USER:-${USER}}"
@@ -110,6 +111,19 @@ chmod 644 "${REQ_FILTERED}"
 run_as_user "${VENV_DIR}/bin/pip" install -r "${REQ_FILTERED}"
 run_as_user "${VENV_DIR}/bin/pip" install -e "${PROJECT_ROOT}"
 
+echo "==> Data directory ${QUANT_DATA_DIR}"
+if [[ ! -d "${QUANT_DATA_DIR}" ]]; then
+  echo "ERROR: data directory does not exist: ${QUANT_DATA_DIR}" >&2
+  echo "Copy market data there (parquet/, indices/, ...) then re-run setup." >&2
+  exit 1
+fi
+if [[ -e "${PROJECT_ROOT}/data" && ! -L "${PROJECT_ROOT}/data" ]]; then
+  echo "Warning: ${PROJECT_ROOT}/data exists and is not a symlink; leaving it as-is." >&2
+else
+  ln -sfn "${QUANT_DATA_DIR}" "${PROJECT_ROOT}/data"
+  chown -h "${TARGET_USER}:${TARGET_USER}" "${PROJECT_ROOT}/data"
+fi
+
 echo "==> Writing Jupyter config (password hashed; plaintext not stored)"
 install -d -o "${TARGET_USER}" -g "${TARGET_USER}" -m 700 "${JUPYTER_DIR}"
 HASH="$(JUPYTER_PASSWORD="${JUPYTER_PASSWORD}" "${VENV_DIR}/bin/python" -c \
@@ -138,6 +152,8 @@ VENV_DIR=${VENV_DIR}
 SERVICE_NAME=${SERVICE_NAME}
 JUPYTER_PORT=${JUPYTER_PORT}
 TARGET_USER=${TARGET_USER}
+QUANT_DATA_DIR=${QUANT_DATA_DIR}
+QUANT_PROJECT_ROOT=${PROJECT_ROOT}
 EOF
 chown "${TARGET_USER}:${TARGET_USER}" "${DEPLOY_ENV}"
 
@@ -155,6 +171,8 @@ WorkingDirectory=${PROJECT_ROOT}
 Environment=PATH=${VENV_DIR}/bin:/usr/bin
 Environment=VIRTUAL_ENV=${VENV_DIR}
 Environment=QUANT_PROJECT_ROOT=${PROJECT_ROOT}
+Environment=QUANT_DATA_DIR=${QUANT_DATA_DIR}
+Environment=PYTHONPATH=${PROJECT_ROOT}/src
 ExecStart=${VENV_DIR}/bin/jupyter notebook --config=${CONFIG_PATH} --no-browser
 Restart=always
 RestartSec=5
@@ -176,6 +194,7 @@ echo
 echo "Setup complete."
 echo "  Jupyter:  http://<vm-ip>:${JUPYTER_PORT}"
 echo "  Auth:     password you set (no token)"
+echo "  Data:     ${QUANT_DATA_DIR}"
 echo "  Service:  sudo systemctl status ${SERVICE_NAME}"
 echo "  Update:   ./scripts/update_and_restart.sh"
 echo

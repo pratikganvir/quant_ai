@@ -6,17 +6,23 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pathlib import Path
+
 from quant.research.explosive_research import (
     ca_invalidates_forward_window,
     calendar_shift,
     daily_precision_lift,
     dedupe_event_episodes,
+    fingerprint_dict,
     first_touch_triple_barrier,
+    force_rerun_phase,
     forward_excursion_calendar,
     mark_ca_suspect,
+    phase_cache_hit,
     purge_overlaps_calendar,
     summarize_daily_metrics,
     trading_calendar_from_panel,
+    write_phase_meta,
 )
 
 from tests.unit.explosive_fixtures import (
@@ -198,6 +204,30 @@ class TestPurgeOverlapsCalendar:
         cutoff = cal[25 - 5]
         assert out.sum() == (dates <= cutoff).sum()
         assert out.iloc[20] and not out.iloc[21]
+
+
+class TestArtifactResume:
+    def test_force_rerun_all(self, tmp_path: Path):
+        cfg = {"rerun_all": True, "force_rerun": []}
+        assert force_rerun_phase(cfg, "panel") is True
+
+    def test_phase_cache_hit_skips_when_fresh(self, tmp_path: Path):
+        art = tmp_path / "out.parquet"
+        art.write_bytes(b"x")
+        meta = tmp_path / "meta.json"
+        fp = "abc123"
+        write_phase_meta(meta, "test", fp)
+        cfg = {"rerun_all": False, "force_rerun": []}
+        assert phase_cache_hit(cfg, "test", [art], meta, fp) is True
+
+    def test_phase_cache_miss_on_force(self, tmp_path: Path):
+        art = tmp_path / "out.parquet"
+        art.write_bytes(b"x")
+        meta = tmp_path / "meta.json"
+        fp = "abc123"
+        write_phase_meta(meta, "test", fp)
+        cfg = {"force_rerun": ["test"]}
+        assert phase_cache_hit(cfg, "test", [art], meta, fp) is False
 
 
 class TestForwardExcursionUsesCalendarNotRows:

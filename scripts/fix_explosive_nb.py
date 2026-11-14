@@ -26,52 +26,64 @@ print("Daily stock files:", len(files))
 if not files:
     raise FileNotFoundError(f"No nse_cm_*.parquet under {DATA_DIR}")
 
-schema_union = set()
-for p in tqdm([files[0], files[len(files) // 2], files[-1]], desc="Phase 1 — schema samples"):
-    schema_union |= {c.lower() for c in pq.ParquetFile(p).schema.names}
+_audit_fp = fingerprint_dict({"n_files": len(files)})
 
-con = duckdb.connect()
-paths = [str(p).replace("'", "''") for p in files]
-paths_sql = ", ".join(f"'{p}'" for p in paths)
-with tqdm(total=2, desc="Phase 1 — DuckDB audit") as pbar:
-    audit_df = con.execute(
-        f'''
-        SELECT COUNT(*) AS n_rows,
-               COUNT(DISTINCT symbol) AS n_symbols,
-               MIN(CAST(date AS DATE)) AS dmin,
-               MAX(CAST(date AS DATE)) AS dmax
-        FROM read_parquet([{paths_sql}], union_by_name=true)
-        '''
-    ).df()
-    pbar.update(1)
-    dup_df = con.execute(
-        f'''
-        SELECT date, symbol, COUNT(*) AS n
-        FROM read_parquet([{paths_sql}], union_by_name=true)
-        GROUP BY 1,2 HAVING n>1 LIMIT 10
-        '''
-    ).df()
-    pbar.update(1)
+if phase_cache_hit(CFG, "audit", [AUDIT_PATH], AUDIT_META_PATH, _audit_fp):
+    audit = json.loads(AUDIT_PATH.read_text())
+    FEATURE_FLAGS.update(audit.get("feature_flags", {}))
+    audit_df = pd.DataFrame(audit.get("duckdb_summary", []))
+    display(audit_df)
+    if audit.get("duplicate_sample"):
+        print("Duplicate (date,symbol) rows (sample):", len(audit["duplicate_sample"]))
+    print("Feature flags:", FEATURE_FLAGS)
+else:
+    schema_union = set()
+    for p in tqdm([files[0], files[len(files) // 2], files[-1]], desc="Phase 1 — schema samples"):
+        schema_union |= {c.lower() for c in pq.ParquetFile(p).schema.names}
 
-FEATURE_FLAGS = {
-    "HAS_TURNOVER": "turnover" in schema_union,
-    "HAS_DELIVERY": ("deliv_per" in schema_union) or ("deliv_qty" in schema_union),
-    "HAS_SERIES": "series" in schema_union,
-    "HAS_PREV_CLOSE": "prev_close" in schema_union,
-}
-audit = {
-    "n_files": len(files),
-    "schema_union": sorted(schema_union),
-    "feature_flags": FEATURE_FLAGS,
-    "duckdb_summary": audit_df.to_dict(orient="records"),
-    "duplicate_sample": dup_df.to_dict(orient="records"),
-    "nifty_exists": NIFTY50_PATH.exists(),
-}
-AUDIT_PATH.write_text(json.dumps(audit, indent=2, default=str))
-display(audit_df)
-if not dup_df.empty:
-    print("Duplicate (date,symbol) rows (sample):", len(dup_df))
-print("Feature flags:", FEATURE_FLAGS)
+    con = duckdb.connect()
+    paths = [str(p).replace("'", "''") for p in files]
+    paths_sql = ", ".join(f"'{p}'" for p in paths)
+    with tqdm(total=2, desc="Phase 1 — DuckDB audit") as pbar:
+        audit_df = con.execute(
+            f'''
+            SELECT COUNT(*) AS n_rows,
+                   COUNT(DISTINCT symbol) AS n_symbols,
+                   MIN(CAST(date AS DATE)) AS dmin,
+                   MAX(CAST(date AS DATE)) AS dmax
+            FROM read_parquet([{paths_sql}], union_by_name=true)
+            '''
+        ).df()
+        pbar.update(1)
+        dup_df = con.execute(
+            f'''
+            SELECT date, symbol, COUNT(*) AS n
+            FROM read_parquet([{paths_sql}], union_by_name=true)
+            GROUP BY 1,2 HAVING n>1 LIMIT 10
+            '''
+        ).df()
+        pbar.update(1)
+
+    FEATURE_FLAGS = {
+        "HAS_TURNOVER": "turnover" in schema_union,
+        "HAS_DELIVERY": ("deliv_per" in schema_union) or ("deliv_qty" in schema_union),
+        "HAS_SERIES": "series" in schema_union,
+        "HAS_PREV_CLOSE": "prev_close" in schema_union,
+    }
+    audit = {
+        "n_files": len(files),
+        "schema_union": sorted(schema_union),
+        "feature_flags": FEATURE_FLAGS,
+        "duckdb_summary": audit_df.to_dict(orient="records"),
+        "duplicate_sample": dup_df.to_dict(orient="records"),
+        "nifty_exists": NIFTY50_PATH.exists(),
+    }
+    AUDIT_PATH.write_text(json.dumps(audit, indent=2, default=str))
+    write_phase_meta(AUDIT_META_PATH, "audit", _audit_fp)
+    display(audit_df)
+    if not dup_df.empty:
+        print("Duplicate (date,symbol) rows (sample):", len(dup_df))
+    print("Feature flags:", FEATURE_FLAGS)
 """.strip() + "\n"
 
 
@@ -109,11 +121,29 @@ def _patch_cell1(nb) -> None:
             "for sub in (\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"):",
             "for sub in tqdm((\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"), desc=\"Setup — output dirs\"):",
         )
-    if "purge_overlaps_calendar" not in src:
+    artifact_imports = (
+        "    fingerprint_dict,\n"
+        "    force_rerun_phase,\n"
+        "    phase_cache_hit,\n"
+        "    write_phase_meta,\n"
+        "    read_meta_fingerprint,\n"
+        "    label_cfg_fingerprint,\n"
+        "    file_fingerprint,\n"
+        "    purge_overlaps_calendar,\n"
+    )
+    if "phase_cache_hit" not in src:
+        src = src.replace(
+            "    summarize_daily_metrics,\n    purge_overlaps_calendar,\n)",
+            "    summarize_daily_metrics,\n" + artifact_imports + ")",
+        )
         src = src.replace(
             "    summarize_daily_metrics,\n)",
-            "    summarize_daily_metrics,\n    purge_overlaps_calendar,\n)",
+            "    summarize_daily_metrics,\n" + artifact_imports + ")",
         )
+    if "META_DIR" not in src:
+        extra = (SCRIPTS / "explosive_nb_cell1_extra.py").read_text()
+        anchor = 'print("NIFTY:", NIFTY50_PATH, "exists" if NIFTY50_PATH.exists() else "missing")'
+        src = src.replace(anchor, anchor + "\n\n" + extra)
     nb["cells"][idx]["source"] = [src]
 
 
@@ -141,8 +171,25 @@ def _patch_cell4(nb) -> None:
     nb["cells"][idx]["source"] = [cell4[start:end].strip() + "\n"]
 
 
+def _patch_markdown(nb) -> None:
+    for c in nb["cells"]:
+        if c["cell_type"] != "markdown":
+            continue
+        s = "".join(c.get("source", []))
+        if "master research notebook" not in s or "**Resume:**" in s:
+            continue
+        s += (
+            "\n\n**Resume:** each phase skips heavy work when parquet/csv artifacts and "
+            "`results/explosive_moves/meta/*_meta.json` fingerprints match. "
+            "Force rebuild: `CFG[\"rerun_all\"] = True` or `CFG[\"force_rerun\"] = [\"panel\", \"events\", ...]` "
+            '(see cell 4).\n'
+        )
+        c["source"] = [s]
+
+
 def main() -> None:
     nb = json.loads(NB.read_text())
+    _patch_markdown(nb)
     _patch_cell1(nb)
     _patch_cell2(nb)
     _patch_cell4(nb)
@@ -153,12 +200,14 @@ def main() -> None:
         "def mfe_threshold_for_horizon": "explosive_nb_events.py",
         "def compute_features": "explosive_nb_phase5.py",
         "def compute_panel_features": "explosive_nb_phase5.py",
+        "_pre_fp = fingerprint_dict": "explosive_nb_pre_event.py",
         "rng = np.random.default_rng": "explosive_nb_pre_event.py",
         "FAMILIES = {": "explosive_nb_helpers.py",
+        "_ml_fp = fingerprint_dict": "explosive_nb_ml.py",
         "from sklearn.isotonic import IsotonicRegression": "explosive_nb_ml.py",
-        "MIN_TRAIN_POS": "explosive_nb_ml.py",
         "def split_masks(df):": "explosive_nb_ml.py",
         "def transaction_cost": "explosive_nb_sim.py",
+        "_scan_fp = fingerprint_dict": "explosive_nb_scan.py",
         'with tqdm(total=4, desc="Phase 9 — scanner")': "explosive_nb_scan.py",
         "latest_date = panel_features": "explosive_nb_scan.py",
         "latest_date = features": "explosive_nb_scan.py",

@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
+
+LABEL_CFG_KEYS = (
+    "horizons",
+    "h_max",
+    "primary_horizon",
+    "primary_mfe_thresh",
+    "ca_gap_abs_exclude",
+    "triple_barrier",
+    "extra_thresholds",
+    "sustained_retention",
+    "event_thresholds",
+)
 
 
 def trading_calendar_from_panel(panel: pd.DataFrame) -> pd.DatetimeIndex:
@@ -231,6 +246,70 @@ def purge_overlaps_calendar(
         return mask
     cutoff = calendar[max(0, pos - horizon)]
     return mask & (pd.to_datetime(frame_dates) <= cutoff)
+
+
+def fingerprint_dict(payload: dict) -> str:
+    blob = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:24]
+
+
+def file_fingerprint(path: Path) -> str:
+    if not path.exists():
+        return ""
+    st = path.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def read_meta_fingerprint(meta_path: Path) -> str:
+    if not meta_path.exists():
+        return ""
+    try:
+        return json.loads(meta_path.read_text()).get("fingerprint", "")
+    except json.JSONDecodeError:
+        return ""
+
+
+def label_cfg_fingerprint(cfg: dict) -> str:
+    return fingerprint_dict({k: cfg[k] for k in LABEL_CFG_KEYS if k in cfg})
+
+
+def force_rerun_phase(cfg: dict, phase: str) -> bool:
+    if cfg.get("rerun_all"):
+        return True
+    fr = cfg.get("force_rerun") or []
+    if "all" in fr:
+        return True
+    return phase in fr
+
+
+def write_phase_meta(meta_path: Path, phase: str, fingerprint: str, **extra) -> None:
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"phase": phase, "fingerprint": fingerprint, **extra}
+    meta_path.write_text(json.dumps(payload, indent=2, default=str))
+
+
+def phase_cache_hit(
+    cfg: dict,
+    phase: str,
+    artifacts: list[Path],
+    meta_path: Path,
+    fingerprint: str,
+) -> bool:
+    if force_rerun_phase(cfg, phase):
+        print(f"[{phase}] force rerun requested")
+        return False
+    if not all(p.exists() for p in artifacts):
+        return False
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError:
+        return False
+    if meta.get("fingerprint") != fingerprint:
+        return False
+    print(f"[{phase}] using cached artifacts ({len(artifacts)} file(s))")
+    return True
 
 
 def summarize_daily_metrics(daily: pd.DataFrame, k: int) -> dict[str, float]:

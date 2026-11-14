@@ -57,6 +57,10 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
             "max_participation_pct": 0.05,
             "initial_capital": 1_000_000.0,
         },
+        # Resume: skip phases when artifacts + meta fingerprint match. Override:
+        #   CFG["rerun_all"] = True  OR  CFG["force_rerun"] = ["panel", "events", ...]
+        "rerun_all": False,
+        "force_rerun": [],
     }
 
     FEATURE_FLAGS = {

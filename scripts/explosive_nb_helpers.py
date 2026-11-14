@@ -71,37 +71,51 @@ def eval_daily_scanner(frame, scores, target, k=20):
 
 train_m, valid_m, test1_m, test2_m, holdout_m = split_masks(features)
 
-train_ab = features.loc[train_m]
-valid_ab = features.loc[valid_m]
-all_cols = feature_cols
+_ab_fp = fingerprint_dict(
+    {"features": read_meta_fingerprint(FEATURES_META_PATH), "wf_splits": CFG["wf_splits"], "target": TARGET}
+)
 
-full_model, full_cols = fit_logit_scorer(train_ab, all_cols, TARGET)
-scores = score_df(valid_ab, full_model, full_cols, TARGET)
-y = valid_ab[TARGET]
-_, full_daily = eval_daily_scanner(valid_ab, scores, TARGET, k=20)
+if phase_cache_hit(CFG, "ablation", [ABLATION_PATH], ABLATION_META_PATH, _ab_fp):
+    ablation = pd.read_csv(ABLATION_PATH)
+    if ABLATION_MODEL_PATH.exists():
+        full_model, full_cols = pickle.loads(ABLATION_MODEL_PATH.read_bytes())
+    else:
+        full_model, full_cols = None, feature_cols
+    display(ablation)
+else:
+    train_ab = features.loc[train_m]
+    valid_ab = features.loc[valid_m]
+    all_cols = feature_cols
 
-rows = []
-for fam, cols in tqdm(FAMILIES.items(), desc="Phase 6 — ablation"):
-    ablate_cols = [c for c in all_cols if c not in cols]
-    m, used = fit_logit_scorer(train_ab, ablate_cols, TARGET)
-    sc = score_df(valid_ab, m, used, TARGET)
-    _, daily = eval_daily_scanner(valid_ab, sc, TARGET, k=20)
+    full_model, full_cols = fit_logit_scorer(train_ab, all_cols, TARGET)
+    scores = score_df(valid_ab, full_model, full_cols, TARGET)
+    _, full_daily = eval_daily_scanner(valid_ab, scores, TARGET, k=20)
+
+    rows = []
+    for fam, cols in tqdm(FAMILIES.items(), desc="Phase 6 — ablation"):
+        ablate_cols = [c for c in all_cols if c not in cols]
+        m, used = fit_logit_scorer(train_ab, ablate_cols, TARGET)
+        sc = score_df(valid_ab, m, used, TARGET)
+        _, daily = eval_daily_scanner(valid_ab, sc, TARGET, k=20)
+        rows.append({
+            "experiment": fam,
+            "mean_precision_at_20": daily["mean_precision_at_20"],
+            "mean_lift_at_20": daily["mean_lift_at_20"],
+            "pct_days_with_hit": daily["pct_days_with_hit"],
+            "delta_lift_vs_full": daily["mean_lift_at_20"] - full_daily["mean_lift_at_20"],
+            "n_features_removed": len(cols),
+        })
     rows.append({
-        "experiment": fam,
-        "mean_precision_at_20": daily["mean_precision_at_20"],
-        "mean_lift_at_20": daily["mean_lift_at_20"],
-        "pct_days_with_hit": daily["pct_days_with_hit"],
-        "delta_lift_vs_full": daily["mean_lift_at_20"] - full_daily["mean_lift_at_20"],
-        "n_features_removed": len(cols),
+        "experiment": "full",
+        "mean_precision_at_20": full_daily["mean_precision_at_20"],
+        "mean_lift_at_20": full_daily["mean_lift_at_20"],
+        "pct_days_with_hit": full_daily["pct_days_with_hit"],
+        "delta_lift_vs_full": 0.0,
+        "n_features_removed": 0,
     })
-rows.append({
-    "experiment": "full",
-    "mean_precision_at_20": full_daily["mean_precision_at_20"],
-    "mean_lift_at_20": full_daily["mean_lift_at_20"],
-    "pct_days_with_hit": full_daily["pct_days_with_hit"],
-    "delta_lift_vs_full": 0.0,
-    "n_features_removed": 0,
-})
-ablation = pd.DataFrame(rows)
-ablation.to_csv(ABLATION_PATH, index=False)
-display(ablation)
+    ablation = pd.DataFrame(rows)
+    ablation.to_csv(ABLATION_PATH, index=False)
+    if full_model is not None:
+        ABLATION_MODEL_PATH.write_bytes(pickle.dumps((full_model, full_cols)))
+    write_phase_meta(ABLATION_META_PATH, "ablation", _ab_fp)
+    display(ablation)

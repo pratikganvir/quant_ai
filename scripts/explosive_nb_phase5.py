@@ -41,7 +41,6 @@ def compute_panel_features(panel_df, nifty_df=None):
         )
 
     x["liq_turn_med20"] = g["Turnover"].transform(lambda s: s.rolling(20, min_periods=10).median())
-    # stale prints / zero-return days (not a pure illiquidity proxy)
     x["liq_zero_ret_20"] = g["Close"].pct_change().transform(
         lambda s: s.rolling(20, min_periods=10).apply(lambda a: np.mean(np.abs(a) < 1e-8), raw=True)
     )
@@ -71,18 +70,37 @@ def attach_event_labels(feat_df, events_df):
     return out
 
 
-with tqdm(total=3, desc="Phase 5 — feature dataset") as pbar:
-    panel_features = compute_panel_features(panel, nifty)
-    pbar.update(1)
+_features_fp = fingerprint_dict(
+    {
+        "panel": read_meta_fingerprint(PANEL_META_PATH),
+        "events": read_meta_fingerprint(EVENTS_META_PATH),
+        "min_price": CFG["min_price"],
+        "min_turnover": CFG["min_median_turnover_20d"],
+        "nifty": file_fingerprint(NIFTY50_PATH),
+    }
+)
+
+if phase_cache_hit(CFG, "features", [FEATURES_PATH, PANEL_FEATURES_PATH], FEATURES_META_PATH, _features_fp):
+    panel_features = pd.read_parquet(PANEL_FEATURES_PATH)
+    features = pd.read_parquet(FEATURES_PATH)
     feature_cols = [
         c for c in panel_features.columns if c.startswith(("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_"))
     ]
-    features = attach_event_labels(panel_features, events)
-    pbar.update(1)
     label_cols = [c for c in features.columns if c.startswith("y_")]
-    print("panel_features:", panel_features.shape, "| labeled rows:", len(features), "features:", len(feature_cols))
-    features.to_parquet(FEATURES_PATH, compression="zstd", index=False)
-    PANEL_FEATURES_PATH = OUT_DIR / "features" / "panel_features.parquet"
-    panel_features.to_parquet(PANEL_FEATURES_PATH, compression="zstd", index=False)
-    pbar.update(1)
-print("Wrote", FEATURES_PATH, "and", PANEL_FEATURES_PATH)
+    print("Loaded features:", panel_features.shape, features.shape)
+else:
+    with tqdm(total=3, desc="Phase 5 — feature dataset") as pbar:
+        panel_features = compute_panel_features(panel, nifty)
+        pbar.update(1)
+        feature_cols = [
+            c for c in panel_features.columns if c.startswith(("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_"))
+        ]
+        features = attach_event_labels(panel_features, events)
+        pbar.update(1)
+        label_cols = [c for c in features.columns if c.startswith("y_")]
+        print("panel_features:", panel_features.shape, "| labeled rows:", len(features), "features:", len(feature_cols))
+        features.to_parquet(FEATURES_PATH, compression="zstd", index=False)
+        panel_features.to_parquet(PANEL_FEATURES_PATH, compression="zstd", index=False)
+        write_phase_meta(FEATURES_META_PATH, "features", _features_fp, n_features=len(feature_cols))
+        pbar.update(1)
+    print("Wrote", FEATURES_PATH, "and", PANEL_FEATURES_PATH)

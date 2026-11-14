@@ -1,6 +1,3 @@
-PANEL_META_PATH = OUT_DIR / "panel" / "panel_build_meta.json"
-
-
 def panel_source_fingerprint(file_paths):
     if not file_paths:
         return ""
@@ -14,6 +11,7 @@ def rebuild_panel(force=False):
     meta = {}
     if PANEL_META_PATH.exists():
         meta = json.loads(PANEL_META_PATH.read_text())
+    force = force or force_rerun_phase(CFG, "panel")
     if PANEL_PATH.exists() and not force and meta.get("fingerprint") == fp:
         print("Using existing panel (fingerprint match):", PANEL_PATH)
         return

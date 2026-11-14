@@ -17,11 +17,11 @@ FIX_SCRIPT = SCRIPTS / "fix_explosive_nb.py"
 CELL_SCRIPT_PAIRS = [
     ("def mfe_threshold_for_horizon", "explosive_nb_events.py"),
     ("def compute_panel_features", "explosive_nb_phase5.py"),
-    ("rng = np.random.default_rng", "explosive_nb_pre_event.py"),
+    ("_pre_fp = fingerprint_dict", "explosive_nb_pre_event.py"),
     ("FAMILIES = {", "explosive_nb_helpers.py"),
     ("from sklearn.isotonic import IsotonicRegression", "explosive_nb_ml.py"),
     ("def transaction_cost", "explosive_nb_sim.py"),
-    ('with tqdm(total=4, desc="Phase 9 — scanner")', "explosive_nb_scan.py"),
+    ("_scan_fp = fingerprint_dict", "explosive_nb_scan.py"),
 ]
 
 RESEARCH_EXPORTS = {
@@ -35,6 +35,10 @@ RESEARCH_EXPORTS = {
     "daily_precision_lift",
     "summarize_daily_metrics",
     "purge_overlaps_calendar",
+    "fingerprint_dict",
+    "phase_cache_hit",
+    "write_phase_meta",
+    "force_rerun_phase",
 }
 
 
@@ -92,6 +96,6 @@ def test_fix_script_runs_pytest_on_explosive_tests():
 
 
 def test_dedupe_used_in_pre_event_cell(notebook_cells):
-    pre = next(src for _, src in notebook_cells if src.startswith("rng = np.random"))
+    pre = next(src for _, src in notebook_cells if src.startswith("_pre_fp = fingerprint_dict"))
     assert "dedupe_event_episodes" in pre
     assert "calendar_shift" in pre

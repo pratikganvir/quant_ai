@@ -62,6 +62,15 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
         "rerun_all": False,
         "force_rerun": [],
         "parallel_workers": 0,  # 0 = auto (min(4, cpu_count)); 1 = serial symbols
+        "ml": {
+            # Walk-forward: train only these on each split (rf is slow on full panel)
+            "walk_forward_models": ["lgbm"],
+            "benchmark_models": ["logit", "rf"],
+            "benchmark_splits": ["valid"],
+            "lgbm_n_estimators": 200,
+            "rf_n_estimators": 80,
+            "train_sample_max": 400_000,
+        },
     }
 
     FEATURE_FLAGS = {

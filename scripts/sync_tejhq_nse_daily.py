@@ -8,7 +8,14 @@ unless --overwrite or --refresh-cache is set.
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _REPO_ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from quant.config import PARQUET_DATA_DIR, TEJHQ_API_KEY
 from quant.data.tejhq import (

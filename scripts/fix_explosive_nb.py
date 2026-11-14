@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply second-review fixes to explosive_moves_research.ipynb."""
+"""Apply notebook cell sources from scripts/explosive_nb_*.py into explosive_moves_research.ipynb."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,11 @@ SCRIPTS = Path(__file__).resolve().parent
 AUDIT_CODE = """
 def stock_parquet_glob():
     return sorted(
-        p for p in DATA_DIR.rglob("nse_cm_*.parquet")
+        p for p in tqdm(
+            DATA_DIR.rglob("nse_cm_*.parquet"),
+            desc="Phase 1 — discover files",
+            unit="path",
+        )
         if "results" not in p.parts and "indices" not in p.parts
     )
 
@@ -21,28 +25,31 @@ if not files:
     raise FileNotFoundError(f"No nse_cm_*.parquet under {DATA_DIR}")
 
 schema_union = set()
-for p in [files[0], files[len(files) // 2], files[-1]]:
+for p in tqdm([files[0], files[len(files) // 2], files[-1]], desc="Phase 1 — schema samples"):
     schema_union |= {c.lower() for c in pq.ParquetFile(p).schema.names}
 
 con = duckdb.connect()
 paths = [str(p).replace("'", "''") for p in files]
 paths_sql = ", ".join(f"'{p}'" for p in paths)
-audit_df = con.execute(
-    f'''
-    SELECT COUNT(*) AS n_rows,
-           COUNT(DISTINCT symbol) AS n_symbols,
-           MIN(CAST(date AS DATE)) AS dmin,
-           MAX(CAST(date AS DATE)) AS dmax
-    FROM read_parquet([{paths_sql}], union_by_name=true)
-    '''
-).df()
-dup_df = con.execute(
-    f'''
-    SELECT date, symbol, COUNT(*) AS n
-    FROM read_parquet([{paths_sql}], union_by_name=true)
-    GROUP BY 1,2 HAVING n>1 LIMIT 10
-    '''
-).df()
+with tqdm(total=2, desc="Phase 1 — DuckDB audit") as pbar:
+    audit_df = con.execute(
+        f'''
+        SELECT COUNT(*) AS n_rows,
+               COUNT(DISTINCT symbol) AS n_symbols,
+               MIN(CAST(date AS DATE)) AS dmin,
+               MAX(CAST(date AS DATE)) AS dmax
+        FROM read_parquet([{paths_sql}], union_by_name=true)
+        '''
+    ).df()
+    pbar.update(1)
+    dup_df = con.execute(
+        f'''
+        SELECT date, symbol, COUNT(*) AS n
+        FROM read_parquet([{paths_sql}], union_by_name=true)
+        GROUP BY 1,2 HAVING n>1 LIMIT 10
+        '''
+    ).df()
+    pbar.update(1)
 
 FEATURE_FLAGS = {
     "HAS_TURNOVER": "turnover" in schema_union,
@@ -84,16 +91,64 @@ def _patch_panel(nb) -> None:
     nb["cells"][idx]["source"] = [head + tail + "\n"]
 
 
+def _patch_cell1(nb) -> None:
+    idx = _find(nb, "import pickle")
+    src = "".join(nb["cells"][idx]["source"])
+    if "from tqdm.auto import tqdm" not in src:
+        insert = (
+            "\nif importlib.util.find_spec(\"tqdm\") is None:\n"
+            "    subprocess.check_call([sys.executable, \"-m\", \"pip\", \"install\", \"-q\", \"tqdm\"])\n"
+            "from tqdm.auto import tqdm\n"
+        )
+        marker = "warnings.filterwarnings(\"ignore\")"
+        src = src.replace(marker, marker + insert)
+    if "tqdm((\"panel\"" not in src:
+        src = src.replace(
+            "for sub in (\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"):",
+            "for sub in tqdm((\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"), desc=\"Setup — output dirs\"):",
+        )
+    nb["cells"][idx]["source"] = [src]
+
+
+def _patch_cell2(nb) -> None:
+    idx = _find(nb, "required = [")
+    src = "".join(nb["cells"][idx]["source"])
+    if '"tqdm"' not in src:
+        src = src.replace(
+            'required = ["pandas", "numpy", "pyarrow", "duckdb", "matplotlib", "scipy"]',
+            'required = ["pandas", "numpy", "pyarrow", "duckdb", "matplotlib", "scipy", "tqdm"]',
+        )
+    if "from tqdm.auto import tqdm" not in src:
+        src = src.replace("from scipy import stats", "from scipy import stats\nfrom tqdm.auto import tqdm")
+    nb["cells"][idx]["source"] = [src]
+
+
+def _patch_cell4(nb) -> None:
+    cell4 = (SCRIPTS / "explosive_nb_setup_cells.py").read_text()
+    start = cell4.index('CELL4_SOURCE = """') + len('CELL4_SOURCE = """')
+    end = cell4.index('""".strip()', start)
+    idx = _find(nb, "CFG = {")
+    if not idx:
+        idx = _find(nb, "with tqdm(total=1, desc=\"Phase 0")
+    nb["cells"][idx]["source"] = [cell4[start:end].strip() + "\n"]
+
+
 def main() -> None:
     nb = json.loads(NB.read_text())
+    _patch_cell1(nb)
+    _patch_cell2(nb)
+    _patch_cell4(nb)
     nb["cells"][_find(nb, "def stock_parquet_glob")]["source"] = [AUDIT_CODE]
     _patch_panel(nb)
 
     replacements = {
+        "def mfe_threshold_for_horizon": "explosive_nb_events.py",
         "def compute_features": "explosive_nb_phase5.py",
         "def compute_panel_features": "explosive_nb_phase5.py",
         "rng = np.random.default_rng": "explosive_nb_pre_event.py",
         "FAMILIES = {": "explosive_nb_helpers.py",
+        "from sklearn.isotonic import IsotonicRegression": "explosive_nb_ml.py",
+        "MIN_TRAIN_POS": "explosive_nb_ml.py",
         "def split_masks(df):": "explosive_nb_ml.py",
         "def transaction_cost": "explosive_nb_sim.py",
         "latest_date = panel_features": "explosive_nb_scan.py",

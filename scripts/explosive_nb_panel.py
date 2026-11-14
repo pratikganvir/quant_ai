@@ -19,7 +19,7 @@ def rebuild_panel(force=False):
         return
     writer = None
     n_ok = n_err = 0
-    for i, f in enumerate(files, 1):
+    for i, f in enumerate(tqdm(files, desc="Phase 2 — stitch panel", unit="file"), 1):
         try:
             x = normalize_ohlc(pd.read_parquet(f), f.name)
             keep = [c for c in BASE_COLS + PANEL_EXTRA if c in x.columns]
@@ -30,7 +30,6 @@ def rebuild_panel(force=False):
             n_ok += 1
             if i % 400 == 0:
                 gc.collect()
-                print(f"stitched {i}/{len(files)}")
         except Exception as exc:
             n_err += 1
             if n_err <= 5:
@@ -41,28 +40,31 @@ def rebuild_panel(force=False):
     print("Panel OK:", n_ok, "errors:", n_err)
 
 
-rebuild_panel(force=False)
-panel = pd.read_parquet(PANEL_PATH)
-panel["Date"] = pd.to_datetime(panel["Date"])
-panel["Symbol"] = panel["Symbol"].astype("string")
-panel = panel.sort_values(["Symbol", "Date"])
-n_dup = int(panel.duplicated(["Date", "Symbol"]).sum())
-if n_dup:
-    print("Dropping duplicate Date-Symbol rows:", n_dup)
-    panel = panel.drop_duplicates(["Date", "Symbol"], keep="last")
-panel = panel.reset_index(drop=True)
+with tqdm(total=2, desc="Phase 2 — panel load") as pbar:
+    rebuild_panel(force=False)
+    pbar.update(1)
+    panel = pd.read_parquet(PANEL_PATH)
+    panel["Date"] = pd.to_datetime(panel["Date"])
+    panel["Symbol"] = panel["Symbol"].astype("string")
+    panel = panel.sort_values(["Symbol", "Date"])
+    n_dup = int(panel.duplicated(["Date", "Symbol"]).sum())
+    if n_dup:
+        print("Dropping duplicate Date-Symbol rows:", n_dup)
+        panel = panel.drop_duplicates(["Date", "Symbol"], keep="last")
+    panel = panel.reset_index(drop=True)
 
-if "Turnover" not in panel.columns:
-    panel["Turnover"] = (panel["Close"] * panel["Volume"]).astype("float32")
+    if "Turnover" not in panel.columns:
+        panel["Turnover"] = (panel["Close"] * panel["Volume"]).astype("float32")
 
-if CFG["eq_series_only"] and "Series" in panel.columns:
-    bad = panel["Series"].notna() & ~panel["Series"].str.upper().eq("EQ")
-    panel = panel.loc[~bad]
+    if CFG["eq_series_only"] and "Series" in panel.columns:
+        bad = panel["Series"].notna() & ~panel["Series"].str.upper().eq("EQ")
+        panel = panel.loc[~bad]
 
-nifty = None
-if NIFTY50_PATH.exists():
-    nifty = normalize_ohlc(pd.read_parquet(NIFTY50_PATH), "NIFTY50")
-    nifty = nifty.sort_values("Date")
-    nifty["nifty_ret_1"] = nifty["Close"].pct_change()
+    nifty = None
+    if NIFTY50_PATH.exists():
+        nifty = normalize_ohlc(pd.read_parquet(NIFTY50_PATH), "NIFTY50")
+        nifty = nifty.sort_values("Date")
+        nifty["nifty_ret_1"] = nifty["Close"].pct_change()
 
-print(panel.shape, panel["Date"].min(), "→", panel["Date"].max(), "symbols:", panel["Symbol"].nunique())
+    print(panel.shape, panel["Date"].min(), "→", panel["Date"].max(), "symbols:", panel["Symbol"].nunique())
+    pbar.update(1)

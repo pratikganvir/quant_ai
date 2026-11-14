@@ -71,14 +71,18 @@ def attach_event_labels(feat_df, events_df):
     return out
 
 
-panel_features = compute_panel_features(panel, nifty)
-feature_cols = [
-    c for c in panel_features.columns if c.startswith(("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_"))
-]
-features = attach_event_labels(panel_features, events)
-label_cols = [c for c in features.columns if c.startswith("y_")]
-print("panel_features:", panel_features.shape, "| labeled rows:", len(features), "features:", len(feature_cols))
-features.to_parquet(FEATURES_PATH, compression="zstd", index=False)
-PANEL_FEATURES_PATH = OUT_DIR / "features" / "panel_features.parquet"
-panel_features.to_parquet(PANEL_FEATURES_PATH, compression="zstd", index=False)
+with tqdm(total=3, desc="Phase 5 — feature dataset") as pbar:
+    panel_features = compute_panel_features(panel, nifty)
+    pbar.update(1)
+    feature_cols = [
+        c for c in panel_features.columns if c.startswith(("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_"))
+    ]
+    features = attach_event_labels(panel_features, events)
+    pbar.update(1)
+    label_cols = [c for c in features.columns if c.startswith("y_")]
+    print("panel_features:", panel_features.shape, "| labeled rows:", len(features), "features:", len(feature_cols))
+    features.to_parquet(FEATURES_PATH, compression="zstd", index=False)
+    PANEL_FEATURES_PATH = OUT_DIR / "features" / "panel_features.parquet"
+    panel_features.to_parquet(PANEL_FEATURES_PATH, compression="zstd", index=False)
+    pbar.update(1)
 print("Wrote", FEATURES_PATH, "and", PANEL_FEATURES_PATH)

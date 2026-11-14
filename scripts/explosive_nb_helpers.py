@@ -92,7 +92,7 @@ y = valid_ab[TARGET]
 _, full_daily = eval_daily_scanner(valid_ab, scores, TARGET, k=20)
 
 rows = []
-for fam, cols in FAMILIES.items():
+for fam, cols in tqdm(FAMILIES.items(), desc="Phase 6 — ablation"):
     ablate_cols = [c for c in all_cols if c not in cols]
     m, used = fit_logit_scorer(train_ab, ablate_cols, TARGET)
     sc = score_df(valid_ab, m, used, TARGET)

@@ -37,7 +37,7 @@ def simulate_topk_calendar(features_df, panel_df, scores, top_k, cfg, calendar):
     equity = []
     trades = 0
 
-    for i in range(len(dates) - 1):
+    for i in tqdm(range(len(dates) - 1), desc=f"Sim top-{top_k}", leave=False):
         d, nxt = dates[i], dates[i + 1]
         panel_nxt = panel_df.loc[panel_df["Date"] == nxt].set_index("Symbol")
 
@@ -121,7 +121,7 @@ if "lgbm" in models and calibrator is not None:
     test = features.loc[test2_m | holdout_m].copy()
     Xte = test[Xcols].replace([np.inf, -np.inf], np.nan).fillna(0)
     test_scores = calibrator.predict(models["lgbm"].predict_proba(Xte)[:, 1])
-    for k in CFG["strategy"]["top_k"]:
+    for k in tqdm(CFG["strategy"]["top_k"], desc="Phase 8 — backtest"):
         eq, stout = simulate_topk_calendar(test, panel, test_scores, k, CFG, TRADING_CAL)
         if not eq.empty:
             print(f"Top-{k} sim:", {kk: (f"{vv:.2%}" if kk == "total_return" else vv) for kk, vv in stout.items()})

@@ -57,7 +57,7 @@ def match_controls(evt_row, k=3):
 
 
 cohort_rows = []
-for _, ev in candidates.iterrows():
+for _, ev in tqdm(candidates.iterrows(), total=len(candidates), desc="Phase 4 — match controls"):
     ctl = match_controls(ev, CFG["match_k"])
     if ctl.empty:
         continue
@@ -90,27 +90,30 @@ if cohort.empty:
 
 n_tests = len(FEATURES_PRE) * len(LAGS)
 tests = []
-for lag in LAGS:
-    for fc in FEATURES_PRE:
-        ev_s = pd.to_numeric(cohort.loc[(cohort["cohort"] == "event") & (cohort["lag"] == lag), fc], errors="coerce")
-        ctl_s = pd.to_numeric(cohort.loc[(cohort["cohort"] == "control") & (cohort["lag"] == lag), fc], errors="coerce")
-        a = ev_s.to_numpy(dtype=np.float64)
-        b = ctl_s.to_numpy(dtype=np.float64)
-        a, b = a[np.isfinite(a)], b[np.isfinite(b)]
-        if len(a) < 30 or len(b) < 30:
-            continue
-        stat, p = stats.mannwhitneyu(a, b, alternative="two-sided")
-        tests.append({
-            "lag": lag,
-            "feature": fc,
-            "n_events": len(a),
-            "n_controls": len(b),
-            "event_median": float(np.median(a)),
-            "control_median": float(np.median(b)),
-            "u_stat": float(stat),
-            "p_value": float(p),
-            "p_bonferroni": min(1.0, float(p) * n_tests),
-        })
+for lag, fc in tqdm(
+    [(lag, fc) for lag in LAGS for fc in FEATURES_PRE],
+    desc="Phase 4 — Mann-Whitney",
+    leave=False,
+):
+    ev_s = pd.to_numeric(cohort.loc[(cohort["cohort"] == "event") & (cohort["lag"] == lag), fc], errors="coerce")
+    ctl_s = pd.to_numeric(cohort.loc[(cohort["cohort"] == "control") & (cohort["lag"] == lag), fc], errors="coerce")
+    a = ev_s.to_numpy(dtype=np.float64)
+    b = ctl_s.to_numpy(dtype=np.float64)
+    a, b = a[np.isfinite(a)], b[np.isfinite(b)]
+    if len(a) < 30 or len(b) < 30:
+        continue
+    stat, p = stats.mannwhitneyu(a, b, alternative="two-sided")
+    tests.append({
+        "lag": lag,
+        "feature": fc,
+        "n_events": len(a),
+        "n_controls": len(b),
+        "event_median": float(np.median(a)),
+        "control_median": float(np.median(b)),
+        "u_stat": float(stat),
+        "p_value": float(p),
+        "p_bonferroni": min(1.0, float(p) * n_tests),
+    })
 
 pre_tests = pd.DataFrame(tests).sort_values("p_bonferroni")
 pre_tests.to_parquet(PRE_EVENT_PATH, compression="zstd", index=False)

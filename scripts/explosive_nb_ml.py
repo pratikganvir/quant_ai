@@ -34,23 +34,27 @@ Xtr, ytr, _ = prep_xy(features.loc[tr_mask])
 Xva, yva, fva = prep_xy(features.loc[valid_m])
 
 if ytr.sum() >= MIN_TRAIN_POS and len(Xva) > 50 and HAS_LGBM:
-    scale = (ytr == 0).sum() / max((ytr == 1).sum(), 1)
-    primary_lgbm = lgb.LGBMClassifier(
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=63,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        class_weight={0: 1.0, 1: scale},
-        random_state=CFG["random_seed"],
-    )
-    primary_lgbm.fit(Xtr, ytr)
-    p_va_raw = primary_lgbm.predict_proba(Xva)[:, 1]
-    calibrator = IsotonicRegression(out_of_bounds="clip")
-    calibrator.fit(p_va_raw, yva)
-    models["lgbm"] = primary_lgbm
+    with tqdm(total=2, desc="Phase 7 — primary LGBM + isotonic") as pbar:
+        scale = (ytr == 0).sum() / max((ytr == 1).sum(), 1)
+        primary_lgbm = lgb.LGBMClassifier(
+            n_estimators=300,
+            learning_rate=0.05,
+            num_leaves=63,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            class_weight={0: 1.0, 1: scale},
+            random_state=CFG["random_seed"],
+        )
+        primary_lgbm.fit(Xtr, ytr)
+        pbar.update(1)
+        p_va_raw = primary_lgbm.predict_proba(Xva)[:, 1]
+        calibrator = IsotonicRegression(out_of_bounds="clip")
+        calibrator.fit(p_va_raw, yva)
+        models["lgbm"] = primary_lgbm
+        pbar.update(1)
 
-for name, mask in [("valid", valid_m), ("test1", test1_m), ("test2", test2_m), ("holdout", holdout_m)]:
+split_iter = [("valid", valid_m), ("test1", test1_m), ("test2", test2_m), ("holdout", holdout_m)]
+for name, mask in tqdm(split_iter, desc="Phase 7 — walk-forward eval"):
     tr_mask = train_m
     if name != "valid":
         tr_mask = train_m | valid_m

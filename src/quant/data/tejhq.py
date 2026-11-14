@@ -183,6 +183,32 @@ def append_manifest(row: Mapping[str, Any]) -> None:
     frame.to_csv(TEJHQ_MANIFEST_PATH, index=False)
 
 
+@dataclass
+class ManifestBatch:
+    """Buffer manifest rows to avoid re-reading the CSV on every trading day."""
+
+    flush_every: int = 50
+    path: Path = field(default_factory=lambda: TEJHQ_MANIFEST_PATH)
+    _rows: list[dict[str, Any]] = field(default_factory=list)
+
+    def add(self, row: Mapping[str, Any]) -> None:
+        self._rows.append(dict(row))
+        if len(self._rows) >= self.flush_every:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._rows:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        chunk = pd.DataFrame(self._rows)
+        if self.path.is_file():
+            prev = pd.read_csv(self.path)
+            chunk = pd.concat([prev, chunk], ignore_index=True)
+        chunk = chunk.drop_duplicates(subset=["date"], keep="last")
+        chunk.to_csv(self.path, index=False)
+        self._rows.clear()
+
+
 def latest_local_parquet_date(parquet_root: Path) -> date | None:
     dates: list[date] = []
     for path in parquet_root.rglob("nse_cm_*.parquet"):
@@ -274,6 +300,36 @@ def classify_data_gaps(
         "non_trading_skipped": sorted(holidays.intersection(missing)),
         "missing_weekdays_total": missing,
     }
+
+
+def days_to_sync(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    *,
+    exclude_holidays: bool = True,
+) -> list[date]:
+    """Weekdays needing work, skipping known holidays (manifest / empty snapshot cache)."""
+    if exclude_holidays:
+        info = classify_data_gaps(parquet_root, start, end)
+        return sorted(set(info["gaps"]))
+    return missing_weekdays(parquet_root, start, end)
+
+
+def estimate_snapshot_api_calls(
+    days: Sequence[date],
+    cache_root: Path,
+    *,
+    refresh_cache: bool = False,
+) -> int:
+    """One TejHQ snapshot HTTP call per day without a gzip cache (no batch snapshot API)."""
+    if refresh_cache:
+        return len(days)
+    n = 0
+    for day in days:
+        if read_json_cache(snapshot_cache_path(cache_root, "nse", day)) is None:
+            n += 1
+    return n
 
 
 def gap_ranges(days: Sequence[date]) -> list[tuple[date, date, int]]:
@@ -450,6 +506,27 @@ class TejHQClient:
         rows, source = self.snapshot(exchange, day, refresh_cache=refresh_cache)
         return snapshot_rows_to_dataframe(rows, day, series=series), source
 
+    def _manifest_record(
+        self,
+        result: Mapping[str, Any],
+        *,
+        write_manifest: bool,
+        manifest_batch: ManifestBatch | None,
+    ) -> None:
+        if not write_manifest:
+            return
+        row = {
+            **dict(result),
+            "parquet_path": result.get("path", ""),
+            "fetched_at": datetime.utcnow().isoformat(),
+        }
+        if "rows" not in row and result.get("status") == "no_rows":
+            row["rows"] = 0
+        if manifest_batch is not None:
+            manifest_batch.add(row)
+        else:
+            append_manifest(row)
+
     def write_nse_cm_parquet(
         self,
         day: date,
@@ -459,6 +536,7 @@ class TejHQClient:
         overwrite: bool = False,
         refresh_cache: bool = False,
         write_manifest: bool = True,
+        manifest_batch: ManifestBatch | None = None,
     ) -> dict[str, Any]:
         path = nse_cm_parquet_path(parquet_root, day)
         cache = snapshot_cache_path(self.cache_dir, "nse", day)
@@ -473,22 +551,32 @@ class TejHQClient:
                     "path": str(path),
                     "cache_path": str(cache),
                 }
-                if write_manifest:
-                    append_manifest(
-                        {
-                            **result,
-                            "parquet_path": result["path"],
-                            "fetched_at": datetime.utcnow().isoformat(),
-                        }
-                    )
+                self._manifest_record(
+                    result, write_manifest=write_manifest, manifest_batch=manifest_batch
+                )
                 return result
 
-        df, source = self.fetch_snapshot_frame(
-            day,
-            exchange="nse",
-            series=series,
-            refresh_cache=refresh_cache,
-        )
+        source = "cache"
+        df: pd.DataFrame
+        if not refresh_cache:
+            cached = read_json_cache(cache)
+            if cached is not None:
+                rows = _unwrap_payload(cached)
+                df = snapshot_rows_to_dataframe(rows, day, series=series)
+            else:
+                df, source = self.fetch_snapshot_frame(
+                    day,
+                    exchange="nse",
+                    series=series,
+                    refresh_cache=False,
+                )
+        else:
+            df, source = self.fetch_snapshot_frame(
+                day,
+                exchange="nse",
+                series=series,
+                refresh_cache=True,
+            )
         if df.empty:
             result = {
                 "date": day,
@@ -497,15 +585,9 @@ class TejHQClient:
                 "path": str(path),
                 "cache_path": str(cache),
             }
-            if write_manifest:
-                append_manifest(
-                    {
-                        **result,
-                        "rows": 0,
-                        "parquet_path": result["path"],
-                        "fetched_at": datetime.utcnow().isoformat(),
-                    }
-                )
+            self._manifest_record(
+                result, write_manifest=write_manifest, manifest_batch=manifest_batch
+            )
             return result
 
         ok, reason = validate_stock_dataframe(df, day)
@@ -517,15 +599,9 @@ class TejHQClient:
                 "path": str(path),
                 "cache_path": str(cache),
             }
-            if write_manifest:
-                append_manifest(
-                    {
-                        **result,
-                        "rows": 0,
-                        "parquet_path": result["path"],
-                        "fetched_at": datetime.utcnow().isoformat(),
-                    }
-                )
+            self._manifest_record(
+                result, write_manifest=write_manifest, manifest_batch=manifest_batch
+            )
             return result
 
         nrow = atomic_write_parquet(df, path)
@@ -537,14 +613,9 @@ class TejHQClient:
             "path": str(path),
             "cache_path": str(cache),
         }
-        if write_manifest:
-            append_manifest(
-                {
-                    **result,
-                    "parquet_path": result["path"],
-                    "fetched_at": datetime.utcnow().isoformat(),
-                }
-            )
+        self._manifest_record(
+            result, write_manifest=write_manifest, manifest_batch=manifest_batch
+        )
         return result
 
 
@@ -556,7 +627,7 @@ def iter_weekdays(start: date, end: date) -> Iterable[date]:
         d += timedelta(days=1)
 
 
-def sync_nse_cm_missing_days(
+def sync_fill_all_gaps(
     parquet_root: Path,
     start: date,
     end: date,
@@ -565,15 +636,57 @@ def sync_nse_cm_missing_days(
     series: str | None = "EQ",
     overwrite: bool = False,
     refresh_cache: bool = False,
+    exclude_holidays: bool = True,
     dry_run: bool = False,
+    manifest_flush_every: int = 50,
 ) -> pd.DataFrame:
-    """Sync only weekdays with no valid parquet (any known layout)."""
-    missing = missing_weekdays(parquet_root, start, end)
-    if dry_run:
-        return pd.DataFrame({"date": missing, "status": ["would_sync"] * len(missing)})
+    """
+    Fill missing weekdays using TejHQ full-market snapshots.
+
+    TejHQ exposes ``/v1/snapshot/{exchange}?date=`` only (one date per call).
+    Range params exist on ``/v1/ohlcv``, ``/v1/delivery``, and ``/v1/adjusted`` per
+    symbol — not for universe-wide daily bhavcopy. This path minimizes calls by:
+
+    - Skipping known holidays (manifest ``no_rows`` / empty snapshot cache)
+    - Serving from gzip snapshot cache when parquet is missing
+    - Batched manifest writes
+    """
     client = client or TejHQClient()
+    days = days_to_sync(parquet_root, start, end, exclude_holidays=exclude_holidays)
+    api_calls = estimate_snapshot_api_calls(
+        days, client.cache_dir, refresh_cache=refresh_cache
+    )
+    ranges = gap_ranges(days)
+
+    print(
+        f"Fill plan [{start} → {end}]: {len(days)} weekdays, "
+        f"~{api_calls} snapshot HTTP calls, {len(ranges)} contiguous ranges"
+    )
+    if ranges:
+        a, b, n = ranges[0]
+        print(f"  first range: {a} → {b} ({n} days)")
+        a, b, n = ranges[-1]
+        print(f"  last range:  {a} → {b} ({n} days)")
+    print(
+        "  Note: per-symbol endpoints use from/to in one call; "
+        "universe daily files use one snapshot per trading day."
+    )
+
+    if dry_run:
+        return pd.DataFrame(
+            {
+                "date": days,
+                "status": ["would_sync"] * len(days),
+                "needs_api": [
+                    read_json_cache(snapshot_cache_path(client.cache_dir, "nse", d)) is None
+                    for d in days
+                ],
+            }
+        )
+
+    manifest = ManifestBatch(flush_every=manifest_flush_every)
     rows: list[dict[str, Any]] = []
-    for day in missing:
+    for i, day in enumerate(days, 1):
         try:
             rows.append(
                 client.write_nse_cm_parquet(
@@ -582,18 +695,39 @@ def sync_nse_cm_missing_days(
                     series=series,
                     overwrite=overwrite,
                     refresh_cache=refresh_cache,
+                    manifest_batch=manifest,
                 )
             )
         except TejHQError as exc:
-            rows.append(
+            err = {
+                "date": day,
+                "status": f"error:{exc}",
+                "source": "api",
+                "path": str(nse_cm_parquet_path(parquet_root, day)),
+            }
+            manifest.add(
                 {
-                    "date": day,
-                    "status": f"error:{exc}",
-                    "source": "api",
-                    "path": str(nse_cm_parquet_path(parquet_root, day)),
+                    **err,
+                    "parquet_path": err["path"],
+                    "fetched_at": datetime.utcnow().isoformat(),
+                    "rows": 0,
                 }
             )
+            rows.append(err)
+        if i % 100 == 0:
+            print(f"  progress {i}/{len(days)}", flush=True)
+    manifest.flush()
     return pd.DataFrame(rows)
+
+
+def sync_nse_cm_missing_days(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Alias for :func:`sync_fill_all_gaps` (backward compatible)."""
+    return sync_fill_all_gaps(parquet_root, start, end, **kwargs)
 
 
 def sync_nse_cm_parquet_range(

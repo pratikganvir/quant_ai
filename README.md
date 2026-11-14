@@ -38,13 +38,15 @@ Put `TEJHQ_API_KEY` in the repo `.env` (gitignored). The sync client **stores ev
 | Per-symbol cache | `raw/tejhq/{ohlcv,delivery,adjusted}/nse/*.json.gz` | Symbol time-series calls |
 | Manifest | `metadata/tejhq_sync_manifest.csv` | Last sync status per date |
 
-Fill **all missing** weekdays (holes before your newest file, through API latest):
+Fill **all missing** weekdays (skips known holidays; uses on-disk snapshot cache before HTTP):
 
 ```bash
 .venv/bin/python scripts/sync_tejhq_nse_daily.py --fill-gaps
-# preview count only:
+# preview days + estimated snapshot API calls (one per day without cache):
 .venv/bin/python scripts/sync_tejhq_nse_daily.py --fill-gaps --dry-run
 ```
+
+TejHQ has no multi-date snapshot endpoint; `from`/`to` applies to per-symbol `ohlcv`, `delivery`, and `adjusted` only.
 
 Optional bounds:
 

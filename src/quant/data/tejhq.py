@@ -1,0 +1,489 @@
+"""TejHQ (api.tejhq.dev) client and NSE daily parquet sync with on-disk cache."""
+
+from __future__ import annotations
+
+import gzip
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import requests
+
+from quant.config import TEJHQ_CACHE_DIR, TEJHQ_MANIFEST_PATH
+
+TEJHQ_BASE_URL = "https://api.tejhq.dev"
+
+STOCK_COLUMNS = [
+    "date",
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+]
+
+OPTIONAL_STOCK_COLUMNS = [
+    "turnover",
+    "deliv_qty",
+    "deliv_per",
+    "series",
+    "prev_close",
+]
+
+
+class TejHQError(RuntimeError):
+    pass
+
+
+def tejhq_api_key() -> str | None:
+    return os.getenv("TEJHQ_API_KEY") or os.getenv("TEJ_API_KEY")
+
+
+def nse_cm_parquet_path(parquet_root: Path, day: date) -> Path:
+    year_dir = parquet_root / str(day.year)
+    return year_dir / f"nse_cm_{day:%Y%m%d}.parquet"
+
+
+def snapshot_cache_path(cache_root: Path, exchange: str, day: date) -> Path:
+    return (
+        cache_root
+        / "snapshots"
+        / exchange.lower()
+        / str(day.year)
+        / f"snapshot_{day:%Y%m%d}.json.gz"
+    )
+
+
+def series_cache_path(
+    cache_root: Path,
+    endpoint: str,
+    exchange: str,
+    symbol: str,
+    from_: date | None,
+    to: date | None,
+) -> Path:
+    f = from_.isoformat() if from_ else "none"
+    t = to.isoformat() if to else "none"
+    name = f"{symbol.upper()}_{f}_{t}.json.gz"
+    return cache_root / endpoint / exchange.lower() / name
+
+
+def _unwrap_payload(body: Mapping[str, Any]) -> list[dict[str, Any]]:
+    data = body.get("data", body)
+    if not isinstance(data, list):
+        raise TejHQError(f"Unexpected API payload shape: {type(data)!r}")
+    return data
+
+
+def read_json_cache(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def write_json_cache(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh, separators=(",", ":"))
+    tmp.replace(path)
+
+
+def snapshot_rows_to_dataframe(
+    rows: Sequence[Mapping[str, Any]],
+    trade_date: date,
+    *,
+    series: str | None = "EQ",
+) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=STOCK_COLUMNS + OPTIONAL_STOCK_COLUMNS)
+
+    df = pd.DataFrame(rows)
+    if series is not None and "series" in df.columns:
+        df = df.loc[df["series"].astype(str).str.upper().eq(series.upper())]
+
+    out = pd.DataFrame(
+        {
+            "date": trade_date,
+            "symbol": df["symbol"].astype(str).str.strip(),
+            "open": pd.to_numeric(df["open"], errors="coerce"),
+            "high": pd.to_numeric(df["high"], errors="coerce"),
+            "low": pd.to_numeric(df["low"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "volume": pd.to_numeric(df["volume"], errors="coerce"),
+            "turnover": pd.to_numeric(df["turnover"], errors="coerce")
+            if "turnover" in df.columns
+            else float("nan"),
+            "series": df["series"].astype(str).str.upper()
+            if "series" in df.columns
+            else "",
+            "prev_close": pd.to_numeric(df["prev_close"], errors="coerce")
+            if "prev_close" in df.columns
+            else float("nan"),
+        }
+    )
+    out = out.dropna(subset=["symbol", "close"])
+    out = out.drop_duplicates(subset=["date", "symbol"], keep="last")
+    cols = STOCK_COLUMNS + [c for c in OPTIONAL_STOCK_COLUMNS if c in out.columns]
+    return out[cols]
+
+
+def validate_stock_dataframe(df: pd.DataFrame, expected_day: date) -> tuple[bool, str]:
+    if df.empty:
+        return False, "empty_dataframe"
+    missing = [c for c in STOCK_COLUMNS if c not in df.columns]
+    if missing:
+        return False, f"missing_columns:{missing}"
+    if not (df["date"] == expected_day).all():
+        return False, "wrong_date"
+    if df["symbol"].isna().any():
+        return False, "invalid_symbols"
+    numeric = ["open", "high", "low", "close", "volume"]
+    if df[numeric].isna().all(axis=1).any():
+        return False, "rows_with_all_numeric_values_null"
+    return True, "ok"
+
+
+def parquet_day_is_valid(path: Path, expected_day: date) -> tuple[bool, int]:
+    if not path.is_file():
+        return False, 0
+    try:
+        df = pq.read_table(path).to_pandas()
+        ok, _ = validate_stock_dataframe(df, expected_day)
+        return ok, len(df)
+    except Exception:
+        return False, 0
+
+
+def atomic_write_parquet(df: pd.DataFrame, path: Path) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".parquet.tmp")
+    tmp.unlink(missing_ok=True)
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), tmp, compression="snappy")
+    tmp.replace(path)
+    return len(df)
+
+
+def append_manifest(row: Mapping[str, Any]) -> None:
+    TEJHQ_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame([row])
+    if TEJHQ_MANIFEST_PATH.is_file():
+        prev = pd.read_csv(TEJHQ_MANIFEST_PATH)
+        frame = pd.concat([prev, frame], ignore_index=True)
+        frame = frame.drop_duplicates(subset=["date"], keep="last")
+    frame.to_csv(TEJHQ_MANIFEST_PATH, index=False)
+
+
+def latest_local_parquet_date(parquet_root: Path) -> date | None:
+    dates: list[date] = []
+    for path in parquet_root.rglob("nse_cm_*.parquet"):
+        stem = path.stem
+        if len(stem) != 15 or not stem.startswith("nse_cm_"):
+            continue
+        try:
+            dates.append(datetime.strptime(stem[7:], "%Y%m%d").date())
+        except ValueError:
+            continue
+    return max(dates) if dates else None
+
+
+@dataclass
+class TejHQClient:
+    api_key: str | None = None
+    base_url: str = TEJHQ_BASE_URL
+    timeout: float = 60.0
+    min_interval_s: float = 0.05
+    cache_dir: Path = field(default_factory=lambda: TEJHQ_CACHE_DIR)
+    use_cache: bool = True
+    _last_request_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.api_key is None:
+            self.api_key = tejhq_api_key()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _headers(self, *, auth: bool) -> dict[str, str]:
+        h = {"Accept": "application/json"}
+        if auth:
+            if not self.api_key:
+                raise TejHQError(
+                    "This endpoint requires TEJHQ_API_KEY or TEJ_API_KEY in the environment."
+                )
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def _throttle(self) -> None:
+        now = time.monotonic()
+        wait = self.min_interval_s - (now - self._last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request_at = time.monotonic()
+
+    def _get(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        auth: bool = False,
+        cache_path: Path | None = None,
+        refresh_cache: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        if self.use_cache and cache_path and not refresh_cache:
+            cached = read_json_cache(cache_path)
+            if cached is not None:
+                return cached, True
+
+        self._throttle()
+        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
+        resp = requests.get(
+            url,
+            params=params,
+            headers=self._headers(auth=auth),
+            timeout=self.timeout,
+        )
+        if resp.status_code == 404:
+            body: dict[str, Any] = {"data": []}
+        elif resp.status_code >= 400:
+            raise TejHQError(f"HTTP {resp.status_code} for {path}: {resp.text[:300]}")
+        else:
+            body = resp.json()
+
+        if self.use_cache and cache_path:
+            write_json_cache(cache_path, body)
+        return body, False
+
+    def status(self) -> dict[str, Any]:
+        cache = self.cache_dir / "status.json.gz"
+        body, _ = self._get("/v1/status", auth=False, cache_path=cache)
+        return body
+
+    def latest_trading_date(self) -> date | None:
+        body = self.status()
+        raw = body.get("trading_date")
+        if not raw:
+            return None
+        return datetime.strptime(str(raw), "%Y-%m-%d").date()
+
+    def snapshot(
+        self,
+        exchange: str,
+        day: date,
+        *,
+        refresh_cache: bool = False,
+    ) -> tuple[list[dict[str, Any]], str]:
+        cache = snapshot_cache_path(self.cache_dir, exchange, day)
+        body, from_cache = self._get(
+            f"/v1/snapshot/{exchange.lower()}",
+            params={"date": day.isoformat()},
+            auth=False,
+            cache_path=cache,
+            refresh_cache=refresh_cache,
+        )
+        source = "cache" if from_cache else "api"
+        return _unwrap_payload(body), source
+
+    def ohlcv(
+        self,
+        symbol: str,
+        exchange: str = "nse",
+        from_: date | None = None,
+        to: date | None = None,
+        *,
+        refresh_cache: bool = False,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if from_ is not None:
+            params["from"] = from_.isoformat()
+        if to is not None:
+            params["to"] = to.isoformat()
+        cache = series_cache_path(self.cache_dir, "ohlcv", exchange, symbol, from_, to)
+        body, _ = self._get(
+            f"/v1/ohlcv/{exchange.lower()}/{symbol.upper()}",
+            params=params or None,
+            auth=False,
+            cache_path=cache,
+            refresh_cache=refresh_cache,
+        )
+        return _unwrap_payload(body)
+
+    def delivery(
+        self,
+        symbol: str,
+        exchange: str = "nse",
+        from_: date | None = None,
+        to: date | None = None,
+        *,
+        refresh_cache: bool = False,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if from_ is not None:
+            params["from"] = from_.isoformat()
+        if to is not None:
+            params["to"] = to.isoformat()
+        cache = series_cache_path(self.cache_dir, "delivery", exchange, symbol, from_, to)
+        body, _ = self._get(
+            f"/v1/delivery/{exchange.lower()}/{symbol.upper()}",
+            params=params or None,
+            auth=True,
+            cache_path=cache,
+            refresh_cache=refresh_cache,
+        )
+        return _unwrap_payload(body)
+
+    def fetch_snapshot_frame(
+        self,
+        day: date,
+        *,
+        exchange: str = "nse",
+        series: str | None = "EQ",
+        refresh_cache: bool = False,
+    ) -> tuple[pd.DataFrame, str]:
+        rows, source = self.snapshot(exchange, day, refresh_cache=refresh_cache)
+        return snapshot_rows_to_dataframe(rows, day, series=series), source
+
+    def write_nse_cm_parquet(
+        self,
+        day: date,
+        parquet_root: Path,
+        *,
+        series: str | None = "EQ",
+        overwrite: bool = False,
+        refresh_cache: bool = False,
+        write_manifest: bool = True,
+    ) -> dict[str, Any]:
+        path = nse_cm_parquet_path(parquet_root, day)
+        cache = snapshot_cache_path(self.cache_dir, "nse", day)
+        if not overwrite:
+            ok, nrows = parquet_day_is_valid(path, day)
+            if ok:
+                result = {
+                    "date": day,
+                    "status": "skipped_valid_parquet",
+                    "source": "parquet",
+                    "rows": nrows,
+                    "path": str(path),
+                    "cache_path": str(cache),
+                }
+                if write_manifest:
+                    append_manifest(
+                        {
+                            **result,
+                            "parquet_path": result["path"],
+                            "fetched_at": datetime.utcnow().isoformat(),
+                        }
+                    )
+                return result
+
+        df, source = self.fetch_snapshot_frame(
+            day,
+            exchange="nse",
+            series=series,
+            refresh_cache=refresh_cache,
+        )
+        if df.empty:
+            result = {
+                "date": day,
+                "status": "no_rows",
+                "source": source,
+                "path": str(path),
+                "cache_path": str(cache),
+            }
+            if write_manifest:
+                append_manifest(
+                    {
+                        **result,
+                        "rows": 0,
+                        "parquet_path": result["path"],
+                        "fetched_at": datetime.utcnow().isoformat(),
+                    }
+                )
+            return result
+
+        ok, reason = validate_stock_dataframe(df, day)
+        if not ok:
+            result = {
+                "date": day,
+                "status": f"invalid:{reason}",
+                "source": source,
+                "path": str(path),
+                "cache_path": str(cache),
+            }
+            if write_manifest:
+                append_manifest(
+                    {
+                        **result,
+                        "rows": 0,
+                        "parquet_path": result["path"],
+                        "fetched_at": datetime.utcnow().isoformat(),
+                    }
+                )
+            return result
+
+        nrow = atomic_write_parquet(df, path)
+        result = {
+            "date": day,
+            "status": "written",
+            "source": source,
+            "rows": nrow,
+            "path": str(path),
+            "cache_path": str(cache),
+        }
+        if write_manifest:
+            append_manifest(
+                {
+                    **result,
+                    "parquet_path": result["path"],
+                    "fetched_at": datetime.utcnow().isoformat(),
+                }
+            )
+        return result
+
+
+def iter_weekdays(start: date, end: date) -> Iterable[date]:
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            yield d
+        d += timedelta(days=1)
+
+
+def sync_nse_cm_parquet_range(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    *,
+    client: TejHQClient | None = None,
+    series: str | None = "EQ",
+    overwrite: bool = False,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    client = client or TejHQClient()
+    rows: list[dict[str, Any]] = []
+    for day in iter_weekdays(start, end):
+        try:
+            result = client.write_nse_cm_parquet(
+                day,
+                parquet_root,
+                series=series,
+                overwrite=overwrite,
+                refresh_cache=refresh_cache,
+            )
+        except TejHQError as exc:
+            path = nse_cm_parquet_path(parquet_root, day)
+            result = {
+                "date": day,
+                "status": f"error:{exc}",
+                "source": "api",
+                "path": str(path),
+            }
+        rows.append(result)
+    return pd.DataFrame(rows)

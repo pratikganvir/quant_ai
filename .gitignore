@@ -23,8 +23,8 @@ env/
 .coverage
 htmlcov/
 
-# Local data
-data/
+# Local data symlink at repo root (not src/quant/data Python package)
+/data/
 *.parquet
 *.csv
 *.feather

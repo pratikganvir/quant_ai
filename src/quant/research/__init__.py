@@ -1,0 +1,1 @@
+"""Research helpers for explosive-move event studies."""

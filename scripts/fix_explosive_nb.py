@@ -122,6 +122,7 @@ def _patch_cell1(nb) -> None:
             "for sub in tqdm((\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"), desc=\"Setup — output dirs\"):",
         )
     artifact_imports = (
+        "    LABEL_ENGINE_VERSION,\n"
         "    fingerprint_dict,\n"
         "    force_rerun_phase,\n"
         "    phase_cache_hit,\n"
@@ -129,6 +130,7 @@ def _patch_cell1(nb) -> None:
         "    read_meta_fingerprint,\n"
         "    label_cfg_fingerprint,\n"
         "    file_fingerprint,\n"
+        "    label_symbol_panel,\n"
         "    purge_overlaps_calendar,\n"
     )
     if "phase_cache_hit" not in src:
@@ -144,6 +146,12 @@ def _patch_cell1(nb) -> None:
         extra = (SCRIPTS / "explosive_nb_cell1_extra.py").read_text()
         anchor = 'print("NIFTY:", NIFTY50_PATH, "exists" if NIFTY50_PATH.exists() else "missing")'
         src = src.replace(anchor, anchor + "\n\n" + extra)
+    for name in ("label_symbol_panel",):
+        if name not in src:
+            src = src.replace(
+                "    LABEL_ENGINE_VERSION,\n    purge_overlaps_calendar,\n)",
+                f"    LABEL_ENGINE_VERSION,\n    {name},\n    purge_overlaps_calendar,\n)",
+            )
     nb["cells"][idx]["source"] = [src]
 
 
@@ -197,7 +205,7 @@ def main() -> None:
     _patch_panel(nb)
 
     replacements = {
-        "def mfe_threshold_for_horizon": "explosive_nb_events.py",
+        "import os\nfrom concurrent.futures import ProcessPoolExecutor": "explosive_nb_events.py",
         "def compute_features": "explosive_nb_phase5.py",
         "def compute_panel_features": "explosive_nb_phase5.py",
         "_pre_fp = fingerprint_dict": "explosive_nb_pre_event.py",

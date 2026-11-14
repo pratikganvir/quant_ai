@@ -61,6 +61,7 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
         #   CFG["rerun_all"] = True  OR  CFG["force_rerun"] = ["panel", "events", ...]
         "rerun_all": False,
         "force_rerun": [],
+        "parallel_workers": 0,  # 0 = auto (min(4, cpu_count)); 1 = serial symbols
     }
 
     FEATURE_FLAGS = {

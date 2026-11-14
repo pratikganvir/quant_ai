@@ -90,7 +90,7 @@ else:
         results.append(eval_probs_daily(fte, pd.Series(p_logit, index=fte.index), f"logit_{name}"))
 
         rf = RandomForestClassifier(
-            n_estimators=200,
+            n_estimators=120,
             max_depth=8,
             min_samples_leaf=50,
             class_weight="balanced",

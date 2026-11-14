@@ -15,7 +15,7 @@ FIX_SCRIPT = SCRIPTS / "fix_explosive_nb.py"
 
 # (notebook cell start prefix, script file basename without path)
 CELL_SCRIPT_PAIRS = [
-    ("def mfe_threshold_for_horizon", "explosive_nb_events.py"),
+    ("import os", "explosive_nb_events.py"),
     ("def compute_panel_features", "explosive_nb_phase5.py"),
     ("_pre_fp = fingerprint_dict", "explosive_nb_pre_event.py"),
     ("FAMILIES = {", "explosive_nb_helpers.py"),
@@ -39,6 +39,8 @@ RESEARCH_EXPORTS = {
     "phase_cache_hit",
     "write_phase_meta",
     "force_rerun_phase",
+    "LABEL_ENGINE_VERSION",
+    "label_symbol_panel",
 }
 
 

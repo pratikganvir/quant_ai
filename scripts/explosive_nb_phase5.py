@@ -41,23 +41,30 @@ def compute_panel_features(panel_df, nifty_df=None):
         )
 
     x["liq_turn_med20"] = g["Turnover"].transform(lambda s: s.rolling(20, min_periods=10).median())
-    x["liq_zero_ret_20"] = g["Close"].pct_change().transform(
-        lambda s: s.rolling(20, min_periods=10).apply(lambda a: np.mean(np.abs(a) < 1e-8), raw=True)
+    daily_ret = g["Close"].pct_change()
+    x["liq_zero_ret_20"] = daily_ret.groupby(x["Symbol"]).transform(
+        lambda s: (s.abs() < 1e-8).rolling(20, min_periods=10).mean()
     )
     if "PrevClose" in x.columns:
         x["liq_gap"] = x["Close"] / x["PrevClose"] - 1
 
     if nifty_df is not None:
-        nd = nifty_df[["Date", "Close"]].rename(columns={"Close": "NiftyClose"})
+        nd = nifty_df[["Date", "Close"]].copy()
         nd["Date"] = pd.to_datetime(nd["Date"], errors="coerce")
-        x = x.merge(nd, on="Date", how="left")
-        nidx = nd.set_index("Date")["NiftyClose"]
-        x["mkt_nifty_ret_5"] = nidx.pct_change(5).reindex(x["Date"]).to_numpy()
-        x["mkt_nifty_ret_20"] = nidx.pct_change(20).reindex(x["Date"]).to_numpy()
+        nd = nd.sort_values("Date")
+        nd = nd.assign(
+            mkt_nifty_ret_5=nd["Close"].pct_change(5),
+            mkt_nifty_ret_20=nd["Close"].pct_change(20),
+        )
+        x = x.merge(nd[["Date", "mkt_nifty_ret_5", "mkt_nifty_ret_20"]], on="Date", how="left")
         x["rs_20"] = x["px_ret_20"] - x["mkt_nifty_ret_20"]
         sma20 = g["Close"].transform(lambda s: s.rolling(20, min_periods=10).mean())
-        x_day = x.assign(_above=(x["Close"] > sma20).astype(int))
-        breadth = x_day.groupby("Date")["_above"].mean().rename("mkt_breadth_20sma")
+        breadth = (
+            x.assign(_above=(x["Close"] > sma20).astype(int))
+            .groupby("Date", observed=True)["_above"]
+            .mean()
+            .rename("mkt_breadth_20sma")
+        )
         x = x.merge(breadth, on="Date", how="left")
     return x
 
@@ -72,6 +79,7 @@ def attach_event_labels(feat_df, events_df):
 
 _features_fp = fingerprint_dict(
     {
+        "engine": LABEL_ENGINE_VERSION,
         "panel": read_meta_fingerprint(PANEL_META_PATH),
         "events": read_meta_fingerprint(EVENTS_META_PATH),
         "min_price": CFG["min_price"],

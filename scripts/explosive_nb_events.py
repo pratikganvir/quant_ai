@@ -1,3 +1,6 @@
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 def mfe_threshold_for_horizon(H, cfg):
     thr_map = {h: t for t, h in cfg["event_thresholds"].values()}
     if H == cfg["primary_horizon"]:
@@ -30,18 +33,28 @@ else:
     min_len = CFG["min_history_bars"] + CFG["h_max"] + 1
     sym_groups = [(s, g) for s, g in sym_groups if len(g) >= min_len]
 
+    tb = CFG["triple_barrier"]
+    horizons = CFG["horizons"]
+    ca_gap = CFG["ca_gap_abs_exclude"]
+    workers = int(CFG.get("parallel_workers", 0))
+    if workers <= 0:
+        workers = min(4, os.cpu_count() or 1)
+
+    def _label_one(pair):
+        _, gsym = pair
+        return label_symbol_panel(
+            gsym, TRADING_CAL, horizons, ca_gap_abs=ca_gap, tb_up=tb["up"], tb_down=tb["down"]
+        )
+
     labeled_parts = []
-    for sym, g in tqdm(sym_groups, desc="Phase 3 — label symbols", unit="sym"):
-        g = forward_excursion_calendar(g, TRADING_CAL, CFG["horizons"])
-        ca = mark_ca_suspect(g, CFG["ca_gap_abs_exclude"])
-        g["ca_suspect"] = ca.values
-        for H in CFG["horizons"]:
-            g[f"ca_fwd_invalid_{H}"] = ca_invalidates_forward_window(g, TRADING_CAL, H, ca).values
-            ok = g[f"horizon_complete_{H}"] & ~g[f"ca_fwd_invalid_{H}"]
-            g[f"y_tb_{H}"] = first_touch_triple_barrier(
-                g, TRADING_CAL, H, CFG["triple_barrier"]["up"], CFG["triple_barrier"]["down"]
-            ).where(ok, np.nan)
-        labeled_parts.append(g)
+    if workers > 1 and len(sym_groups) > workers * 2:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_label_one, p) for p in sym_groups]
+            for fut in tqdm(as_completed(futs), total=len(futs), desc="Phase 3 — label symbols", unit="sym"):
+                labeled_parts.append(fut.result())
+    else:
+        for pair in tqdm(sym_groups, desc="Phase 3 — label symbols", unit="sym"):
+            labeled_parts.append(_label_one(pair))
 
     with tqdm(total=2, desc="Phase 3 — finalize events") as bar:
         labeled = pd.concat(labeled_parts, ignore_index=True)

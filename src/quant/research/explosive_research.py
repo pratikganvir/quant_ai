@@ -10,6 +10,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+LABEL_ENGINE_VERSION = "3"  # bump when label/feature numerics change (invalidates caches)
+
 LABEL_CFG_KEYS = (
     "horizons",
     "h_max",
@@ -51,6 +53,14 @@ def mark_ca_suspect(panel: pd.DataFrame, gap_abs: float) -> pd.Series:
     return (gap.abs() >= gap_abs).fillna(False)
 
 
+def _symbol_calendar_row_map(cal_pos: np.ndarray, n_cal: int) -> np.ndarray:
+    """sym_row_at_cal[p] = row index in symbol frame for exchange session p, else -1."""
+    sym_row_at_cal = np.full(n_cal, -1, dtype=np.int32)
+    ok = cal_pos >= 0
+    sym_row_at_cal[cal_pos[ok]] = np.nonzero(ok)[0].astype(np.int32)
+    return sym_row_at_cal
+
+
 def forward_excursion_calendar(
     sym_df: pd.DataFrame,
     calendar: pd.DatetimeIndex,
@@ -65,11 +75,12 @@ def forward_excursion_calendar(
     if g.empty:
         return g
 
-    idx_by_date = {d: i for i, d in enumerate(g["Date"].to_numpy())}
-    close = g["Close"].to_numpy()
-    high = g["High"].to_numpy()
-    low = g["Low"].to_numpy()
+    sym_row_at_cal = _symbol_calendar_row_map(cal_pos, len(calendar))
+    close = g["Close"].to_numpy(dtype=np.float64)
+    high = g["High"].to_numpy(dtype=np.float64)
+    low = g["Low"].to_numpy(dtype=np.float64)
     n = len(g)
+    n_cal = len(calendar)
 
     for H in horizons:
         mfe = np.full(n, np.nan)
@@ -82,14 +93,10 @@ def forward_excursion_calendar(
                 continue
             start = cal_pos[i] + 1
             end = cal_pos[i] + H
-            if end >= len(calendar):
+            if end >= n_cal:
                 continue
-            fut_dates = calendar[start : end + 1]
-            j_idx = [idx_by_date.get(d) for d in fut_dates.to_numpy()]
-            if any(j is None for j in j_idx):
-                continue
-            j_idx = np.array(j_idx, dtype=int)
-            if len(j_idx) != H:
+            j_idx = sym_row_at_cal[start : end + 1]
+            if j_idx.shape[0] != H or (j_idx < 0).any():
                 continue
             seg_h = high[j_idx]
             seg_l = low[j_idx]
@@ -112,21 +119,20 @@ def ca_invalidates_forward_window(
 ) -> pd.Series:
     """True if any CA-suspect day occurs from T+1 through T+H on the exchange calendar."""
     g = sym_df.sort_values("Date").copy()
-    ca = ca_flag.reindex(g.index).fillna(False)
+    ca = ca_flag.reindex(g.index).fillna(False).to_numpy(dtype=bool)
     cal_pos = calendar.get_indexer(pd.to_datetime(g["Date"]))
+    n_cal = len(calendar)
+    ca_on_cal = np.zeros(n_cal, dtype=bool)
+    ok = cal_pos >= 0
+    ca_on_cal[cal_pos[ok]] |= ca[ok]
     invalid = np.zeros(len(g), dtype=bool)
-    date_index = pd.to_datetime(g["Date"]).to_numpy()
-    ca_by_date = dict(zip(date_index, ca.to_numpy()))
     for i, pos in enumerate(cal_pos):
         if pos < 0:
             invalid[i] = True
             continue
-        end = min(pos + horizon, len(calendar) - 1)
-        for p in range(pos + 1, end + 1):
-            d = calendar[p]
-            if ca_by_date.get(d, False):
-                invalid[i] = True
-                break
+        end = min(pos + horizon, n_cal - 1)
+        if ca_on_cal[pos + 1 : end + 1].any():
+            invalid[i] = True
     return pd.Series(invalid, index=g.index)
 
 
@@ -143,8 +149,9 @@ def first_touch_triple_barrier(
     close = g["Close"].to_numpy()
     high = g["High"].to_numpy()
     low = g["Low"].to_numpy()
-    idx_by_date = {d: i for i, d in enumerate(g["Date"].to_numpy())}
+    sym_row_at_cal = _symbol_calendar_row_map(cal_pos, len(calendar))
     out = np.full(len(g), np.nan)
+    n_cal = len(calendar)
 
     for i in range(len(g)):
         c0 = close[i]
@@ -152,14 +159,13 @@ def first_touch_triple_barrier(
             continue
         start = cal_pos[i] + 1
         end = cal_pos[i] + horizon
-        if end >= len(calendar):
+        if end >= n_cal:
+            continue
+        j_idx = sym_row_at_cal[start : end + 1]
+        if j_idx.shape[0] != horizon or (j_idx < 0).any():
             continue
         hit = np.nan
-        for p in range(start, end + 1):
-            j = idx_by_date.get(calendar[p])
-            if j is None:
-                hit = np.nan
-                break
+        for j in j_idx:
             up_hit = high[j] / c0 - 1 >= up
             dn_hit = low[j] / c0 - 1 <= down
             if up_hit and dn_hit:
@@ -171,11 +177,28 @@ def first_touch_triple_barrier(
             if dn_hit:
                 hit = 0.0
                 break
-        if np.isnan(hit):
-            # no barrier touched: treat as failure for tradable barrier study
-            hit = 0.0
-        out[i] = hit
+        out[i] = 0.0 if np.isnan(hit) else hit
     return pd.Series(out, index=g.index)
+
+
+def label_symbol_panel(
+    sym_df: pd.DataFrame,
+    calendar: pd.DatetimeIndex,
+    horizons: Iterable[int],
+    *,
+    ca_gap_abs: float,
+    tb_up: float,
+    tb_down: float,
+) -> pd.DataFrame:
+    """One symbol: forward labels, CA flags, triple-barrier (for parallel workers)."""
+    g = forward_excursion_calendar(sym_df, calendar, horizons)
+    ca = mark_ca_suspect(g, ca_gap_abs)
+    g["ca_suspect"] = ca.values
+    for H in horizons:
+        g[f"ca_fwd_invalid_{H}"] = ca_invalidates_forward_window(g, calendar, H, ca).values
+        ok = g[f"horizon_complete_{H}"] & ~g[f"ca_fwd_invalid_{H}"]
+        g[f"y_tb_{H}"] = first_touch_triple_barrier(g, calendar, H, tb_up, tb_down).where(ok, np.nan)
+    return g
 
 
 def dedupe_event_episodes(
@@ -194,8 +217,8 @@ def dedupe_event_episodes(
     for _, g in x.groupby(symbol_col, observed=True):
         g = g.sort_values(date_col)
         last_pos = -gap_sessions - 1
-        for idx, row in g.iterrows():
-            cal_pos = int(row["cal_pos"])
+        cal_arr = g["cal_pos"].to_numpy(dtype=np.int64)
+        for idx, cal_pos in zip(g.index, cal_arr):
             if cal_pos < 0:
                 continue
             if cal_pos - last_pos > gap_sessions:
@@ -270,7 +293,9 @@ def read_meta_fingerprint(meta_path: Path) -> str:
 
 
 def label_cfg_fingerprint(cfg: dict) -> str:
-    return fingerprint_dict({k: cfg[k] for k in LABEL_CFG_KEYS if k in cfg})
+    base = {k: cfg[k] for k in LABEL_CFG_KEYS if k in cfg}
+    base["engine"] = LABEL_ENGINE_VERSION
+    return fingerprint_dict(base)
 
 
 def force_rerun_phase(cfg: dict, phase: str) -> bool:

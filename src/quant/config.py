@@ -8,6 +8,27 @@ _DEFAULT_DATA_DIR = Path("/home/pratik/data/quant_ai")
 PROJECT_ROOT = Path(os.getenv("QUANT_PROJECT_ROOT", str(_REPO_ROOT)))
 
 
+def _load_dotenv() -> None:
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.is_file():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
+TEJHQ_API_KEY = os.getenv("TEJHQ_API_KEY") or os.getenv("TEJ_API_KEY")
+TEJHQ_BASE_URL = os.getenv("TEJHQ_BASE_URL", "https://api.tejhq.dev")
+
+
 def _resolve_data_dir() -> Path:
     configured = Path(os.getenv("QUANT_DATA_DIR", str(_DEFAULT_DATA_DIR))).expanduser()
     for root in (configured, configured / "data"):
@@ -25,6 +46,12 @@ PARQUET_DATA_DIR = (
 )
 
 METADATA_DIR = DATA_DIR / "metadata"
+
+TEJHQ_CACHE_DIR = Path(
+    os.getenv("TEJHQ_CACHE_DIR", str(RAW_DATA_DIR / "tejhq"))
+).expanduser()
+
+TEJHQ_MANIFEST_PATH = METADATA_DIR / "tejhq_sync_manifest.csv"
 
 INDEX_DATA_DIR = DATA_DIR / "indices"
 

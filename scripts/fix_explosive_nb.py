@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 NB = Path(__file__).resolve().parents[1] / "strategies" / "explosive_moves_research.ipynb"
@@ -107,6 +109,11 @@ def _patch_cell1(nb) -> None:
             "for sub in (\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"):",
             "for sub in tqdm((\"panel\", \"events\", \"features\", \"models\", \"reports\", \"reports/figures\", \"scanner\"), desc=\"Setup — output dirs\"):",
         )
+    if "purge_overlaps_calendar" not in src:
+        src = src.replace(
+            "    summarize_daily_metrics,\n)",
+            "    summarize_daily_metrics,\n    purge_overlaps_calendar,\n)",
+        )
     nb["cells"][idx]["source"] = [src]
 
 
@@ -127,9 +134,10 @@ def _patch_cell4(nb) -> None:
     cell4 = (SCRIPTS / "explosive_nb_setup_cells.py").read_text()
     start = cell4.index('CELL4_SOURCE = """') + len('CELL4_SOURCE = """')
     end = cell4.index('""".strip()', start)
-    idx = _find(nb, "CFG = {")
-    if not idx:
+    try:
         idx = _find(nb, "with tqdm(total=1, desc=\"Phase 0")
+    except KeyError:
+        idx = _find(nb, "CFG = {")
     nb["cells"][idx]["source"] = [cell4[start:end].strip() + "\n"]
 
 
@@ -151,6 +159,7 @@ def main() -> None:
         "MIN_TRAIN_POS": "explosive_nb_ml.py",
         "def split_masks(df):": "explosive_nb_ml.py",
         "def transaction_cost": "explosive_nb_sim.py",
+        'with tqdm(total=4, desc="Phase 9 — scanner")': "explosive_nb_scan.py",
         "latest_date = panel_features": "explosive_nb_scan.py",
         "latest_date = features": "explosive_nb_scan.py",
     }
@@ -166,6 +175,24 @@ def main() -> None:
 
     NB.write_text(json.dumps(nb, indent=1))
     print("updated", NB)
+    _run_explosive_tests()
+
+
+def _run_explosive_tests() -> None:
+    repo = NB.resolve().parents[1]
+    py = repo / ".venv" / "bin" / "python"
+    if not py.exists():
+        py = Path(sys.executable)
+    cmd = [
+        str(py),
+        "-m",
+        "pytest",
+        "tests/unit/test_explosive_research.py",
+        "tests/unit/test_explosive_notebook_contract.py",
+        "-q",
+    ]
+    print("running", " ".join(cmd))
+    subprocess.run(cmd, cwd=repo, check=True)
 
 
 if __name__ == "__main__":

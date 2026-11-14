@@ -22,17 +22,6 @@ def split_masks(df):
     return train, valid, test1, test2, holdout
 
 
-def purge_overlaps_calendar(train_mask, test_start, horizon, calendar):
-    """Drop training rows whose forward label window could overlap the test start (session-based)."""
-    test_start = pd.Timestamp(test_start)
-    pos = calendar.get_indexer([test_start])[0]
-    if pos < 0:
-        return train_mask
-    cutoff = calendar[max(0, pos - horizon)]
-    dates = features.loc[train_mask, "Date"]
-    return train_mask & (dates <= cutoff)
-
-
 def precision_at_k(y_true, y_score, k=20):
     if len(y_true) == 0:
         return np.nan

@@ -1,0 +1,23 @@
+---
+description: Explosive moves notebook — keep tests in sync with research module and cell scripts
+globs: strategies/explosive_moves_research.ipynb,scripts/explosive_nb*.py,src/quant/research/explosive_research.py,tests/unit/test_explosive*.py
+alwaysApply: false
+---
+
+# Explosive moves research — test discipline
+
+When you change any of:
+
+- `src/quant/research/explosive_research.py`
+- `scripts/explosive_nb_*.py` or `scripts/fix_explosive_nb.py`
+- `strategies/explosive_moves_research.ipynb` (direct edits)
+
+you **must**:
+
+1. Add or update tests in `tests/unit/test_explosive_research.py` (library logic) and/or `tests/unit/test_explosive_notebook_contract.py` (notebook ↔ script sync).
+2. Run `python scripts/fix_explosive_nb.py` (syncs notebook from scripts and runs explosive tests).
+3. Or run: `pytest tests/unit/test_explosive_research.py tests/unit/test_explosive_notebook_contract.py -q`
+
+Put new **testable** logic in `explosive_research.py`, not only in notebook cells. Notebook cells should call imported helpers.
+
+Regression coverage must include `dedupe_event_episodes` (never use `itertuples` with internal `cal_pos`-style columns without a test).

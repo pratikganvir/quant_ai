@@ -29,7 +29,9 @@ results = []
 models = {}
 
 # Purged train for the primary model; calibrate only on chronological validation.
-tr_mask = purge_overlaps_calendar(train_m, features.loc[valid_m, "Date"].min(), CFG["h_max"], TRADING_CAL)
+tr_mask = purge_overlaps_calendar(
+    train_m, features["Date"], features.loc[valid_m, "Date"].min(), CFG["h_max"], TRADING_CAL
+)
 Xtr, ytr, _ = prep_xy(features.loc[tr_mask])
 Xva, yva, fva = prep_xy(features.loc[valid_m])
 
@@ -60,7 +62,7 @@ for name, mask in tqdm(split_iter, desc="Phase 7 — walk-forward eval"):
         tr_mask = train_m | valid_m
     test_start = features.loc[mask, "Date"].min()
     if pd.notna(test_start):
-        tr_mask = purge_overlaps_calendar(tr_mask, test_start, CFG["h_max"], TRADING_CAL)
+        tr_mask = purge_overlaps_calendar(tr_mask, features["Date"], test_start, CFG["h_max"], TRADING_CAL)
     Xtr, ytr, _ = prep_xy(features.loc[tr_mask])
     Xte, yte, fte = prep_xy(features.loc[mask])
     if len(Xtr) < 100 or len(Xte) < 50:

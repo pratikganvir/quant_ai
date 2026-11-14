@@ -1,0 +1,32 @@
+name: Explosive research tests
+
+on:
+  push:
+    paths:
+      - "src/quant/research/**"
+      - "scripts/explosive_nb*.py"
+      - "scripts/fix_explosive_nb.py"
+      - "strategies/explosive_moves_research.ipynb"
+      - "tests/unit/test_explosive*.py"
+      - "tests/unit/explosive_fixtures.py"
+      - ".github/workflows/explosive-research-tests.yml"
+  pull_request:
+    paths:
+      - "src/quant/research/**"
+      - "scripts/explosive_nb*.py"
+      - "scripts/fix_explosive_nb.py"
+      - "strategies/explosive_moves_research.ipynb"
+      - "tests/unit/test_explosive*.py"
+      - "tests/unit/explosive_fixtures.py"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pandas numpy scipy
+      - run: pip install -e .
+      - run: pytest tests/unit/test_explosive_research.py tests/unit/test_explosive_notebook_contract.py -q

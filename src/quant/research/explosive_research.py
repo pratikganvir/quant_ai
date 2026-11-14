@@ -174,19 +174,19 @@ def dedupe_event_episodes(
 ) -> pd.DataFrame:
     """Keep the first event in each symbol run of high-MFE episodes separated by gap_sessions."""
     x = events.sort_values([symbol_col, date_col]).copy()
-    pos = calendar.get_indexer(pd.to_datetime(x[date_col]))
-    x["_cal_pos"] = pos
-    keep = []
-    for sym, g in x.groupby(symbol_col, observed=True):
+    x["cal_pos"] = calendar.get_indexer(pd.to_datetime(x[date_col]))
+    keep: list = []
+    for _, g in x.groupby(symbol_col, observed=True):
         g = g.sort_values(date_col)
         last_pos = -gap_sessions - 1
-        for r in g.itertuples():
-            if r._cal_pos < 0:
+        for idx, row in g.iterrows():
+            cal_pos = int(row["cal_pos"])
+            if cal_pos < 0:
                 continue
-            if r._cal_pos - last_pos > gap_sessions:
-                keep.append(r.Index)
-                last_pos = r._cal_pos
-    return x.loc[keep].drop(columns="_cal_pos", errors="ignore")
+            if cal_pos - last_pos > gap_sessions:
+                keep.append(idx)
+                last_pos = cal_pos
+    return x.loc[keep].drop(columns="cal_pos", errors="ignore")
 
 
 def daily_precision_lift(
@@ -215,6 +215,22 @@ def daily_precision_lift(
             "any_hit": int(top[y_col].sum() > 0),
         })
     return pd.DataFrame(rows)
+
+
+def purge_overlaps_calendar(
+    mask: pd.Series,
+    frame_dates: pd.Series,
+    test_start,
+    horizon: int,
+    calendar: pd.DatetimeIndex,
+) -> pd.Series:
+    """Drop rows whose forward label window could overlap test_start (exchange sessions)."""
+    test_start = pd.Timestamp(test_start)
+    pos = calendar.get_indexer([test_start])[0]
+    if pos < 0:
+        return mask
+    cutoff = calendar[max(0, pos - horizon)]
+    return mask & (pd.to_datetime(frame_dates) <= cutoff)
 
 
 def summarize_daily_metrics(daily: pd.DataFrame, k: int) -> dict[str, float]:

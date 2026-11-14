@@ -33,6 +33,11 @@ def parse_date(raw: str) -> date:
     return datetime.strptime(raw, "%Y-%m-%d").date()
 
 
+def _default_log_path() -> Path:
+    data = Path(__import__("os").environ.get("QUANT_DATA_DIR", "/home/pratik/data/quant_ai"))
+    return data / "metadata" / "tejhq_fill_gaps.log"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", type=parse_date, default=None, help="YYYY-MM-DD")
@@ -67,16 +72,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    log_path = args.log
-    if log_path is None:
-        from quant.config import TEJHQ_MANIFEST_PATH
-
-        log_path = TEJHQ_MANIFEST_PATH.parent / "tejhq_fill_gaps.log"
+    log_path = args.log or _default_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch(exist_ok=True)
 
     class _Tee:
         def __init__(self, stream, path: Path):
             self._stream = stream
-            path.parent.mkdir(parents=True, exist_ok=True)
             self._file = path.open("a", encoding="utf-8")
 
         def write(self, data: str) -> int:
@@ -89,10 +91,12 @@ def main() -> None:
             self._stream.flush()
             self._file.flush()
 
-    import sys as _sys
+        def isatty(self) -> bool:
+            return False
 
-    _sys.stdout = _Tee(_sys.stdout, log_path)
-    _sys.stderr = _Tee(_sys.stderr, log_path)
+    _stdout, _stderr = sys.stdout, sys.stderr
+    sys.stdout = _Tee(_stdout, log_path)
+    sys.stderr = _Tee(_stderr, log_path)
     print(f"Logging to {log_path}", flush=True)
 
     client = TejHQClient(api_key=TEJHQ_API_KEY)

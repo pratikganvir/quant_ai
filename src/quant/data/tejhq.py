@@ -238,8 +238,27 @@ def day_has_valid_parquet(parquet_root: Path, day: date) -> bool:
     return False
 
 
+def indexed_parquet_dates(parquet_root: Path) -> set[date]:
+    """Fast index of dates with any nse_cm file (by filename; not full validation)."""
+    found: set[date] = set()
+    if not parquet_root.is_dir():
+        return found
+    for path in parquet_root.rglob("nse_cm_*.parquet"):
+        stem = path.stem
+        if not stem.startswith("nse_cm_") or len(stem) != 15:
+            continue
+        try:
+            found.add(datetime.strptime(stem[7:], "%Y%m%d").date())
+        except ValueError:
+            continue
+    return found
+
+
 def missing_weekdays(parquet_root: Path, start: date, end: date) -> list[date]:
-    return [d for d in iter_weekdays(start, end) if not day_has_valid_parquet(parquet_root, d)]
+    have = indexed_parquet_dates(parquet_root)
+    missing = [d for d in iter_weekdays(start, end) if d not in have]
+    # Re-check edge cases: file present but invalid
+    return [d for d in missing if not day_has_valid_parquet(parquet_root, d)]
 
 
 def snapshot_cache_empty(cache_root: Path, day: date, exchange: str = "nse") -> bool | None:
@@ -652,6 +671,7 @@ def sync_fill_all_gaps(
     - Batched manifest writes
     """
     client = client or TejHQClient()
+    print("Scanning local parquet index…", flush=True)
     days = days_to_sync(parquet_root, start, end, exclude_holidays=exclude_holidays)
     api_calls = estimate_snapshot_api_calls(
         days, client.cache_dir, refresh_cache=refresh_cache

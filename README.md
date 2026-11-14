@@ -38,10 +38,24 @@ Put `TEJHQ_API_KEY` in the repo `.env` (gitignored). The sync client **stores ev
 | Per-symbol cache | `raw/tejhq/{ohlcv,delivery,adjusted}/nse/*.json.gz` | Symbol time-series calls |
 | Manifest | `metadata/tejhq_sync_manifest.csv` | Last sync status per date |
 
-Incremental sync (only missing trading days):
+Fill **all missing** weekdays (holes before your newest file, through API latest):
 
 ```bash
-PYTHONPATH=src python scripts/sync_tejhq_nse_daily.py --incremental
+.venv/bin/python scripts/sync_tejhq_nse_daily.py --fill-gaps
+# preview count only:
+.venv/bin/python scripts/sync_tejhq_nse_daily.py --fill-gaps --dry-run
+```
+
+Optional bounds:
+
+```bash
+.venv/bin/python scripts/sync_tejhq_nse_daily.py --fill-gaps --start 2015-01-01 --end 2026-11-13
+```
+
+Incremental (only after the **newest** `nse_cm_*.parquet` filename — can skip interior gaps):
+
+```bash
+.venv/bin/python scripts/sync_tejhq_nse_daily.py --incremental
 ```
 
 Backfill a range (uses cache + existing Parquet when present):

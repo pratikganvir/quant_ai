@@ -3,6 +3,9 @@
 
 Idempotent: valid local Parquet and gzip JSON caches are reused — no repeat API calls
 unless --overwrite or --refresh-cache is set.
+
+Use --fill-gaps to download every weekday in a range that lacks a valid parquet file
+(including holes before your newest on-disk date).
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from quant.config import PARQUET_DATA_DIR, TEJHQ_API_KEY
 from quant.data.tejhq import (
     TejHQClient,
     latest_local_parquet_date,
+    missing_weekdays,
+    sync_nse_cm_missing_days,
     sync_nse_cm_parquet_range,
 )
 
@@ -36,7 +41,17 @@ def main() -> None:
     parser.add_argument(
         "--incremental",
         action="store_true",
-        help="Start the day after the latest valid local nse_cm_*.parquet (ignores --start)",
+        help="Start the day after the latest nse_cm_*.parquet filename (can skip interior gaps)",
+    )
+    parser.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="Sync only weekdays missing a valid parquet (recommended)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --fill-gaps: print how many days would be synced",
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace existing parquet files")
     parser.add_argument(
@@ -50,28 +65,62 @@ def main() -> None:
     client = TejHQClient(api_key=TEJHQ_API_KEY)
     end = args.end or client.latest_trading_date() or date.today()
 
-    if args.incremental:
+    default_start = date(2011, 1, 4)
+
+    if args.fill_gaps:
+        start = args.start or default_start
+        if end < start:
+            raise SystemExit("end before start")
+        missing = missing_weekdays(PARQUET_DATA_DIR, start, end)
+        print(f"Missing weekdays in [{start}, {end}]: {len(missing)}")
+        if missing:
+            print("  first:", missing[0], " last:", missing[-1])
+        if args.dry_run:
+            return
+        out = sync_nse_cm_missing_days(
+            PARQUET_DATA_DIR,
+            start,
+            end,
+            client=client,
+            series=None if args.all_series else "EQ",
+            overwrite=args.overwrite,
+            refresh_cache=args.refresh_cache,
+        )
+    elif args.incremental:
         last = latest_local_parquet_date(PARQUET_DATA_DIR)
-        start = (last + timedelta(days=1)) if last else date(2011, 1, 1)
+        start = (last + timedelta(days=1)) if last else default_start
+        if end < start:
+            print("Nothing to sync: newest filename is already through", last)
+            print("Tip: use --fill-gaps to backfill holes before", last)
+            return
+        out = sync_nse_cm_parquet_range(
+            PARQUET_DATA_DIR,
+            start,
+            end,
+            client=client,
+            series=None if args.all_series else "EQ",
+            overwrite=args.overwrite,
+            refresh_cache=args.refresh_cache,
+        )
     elif args.start is not None:
         start = args.start
+        if end < start:
+            raise SystemExit("end before start")
+        out = sync_nse_cm_parquet_range(
+            PARQUET_DATA_DIR,
+            start,
+            end,
+            client=client,
+            series=None if args.all_series else "EQ",
+            overwrite=args.overwrite,
+            refresh_cache=args.refresh_cache,
+        )
     else:
-        raise SystemExit("Provide --start or use --incremental")
+        raise SystemExit("Use --fill-gaps, --incremental, or --start")
 
-    if end < start:
-        print("Nothing to sync: local data is already through", end)
+    if out.empty:
+        print("No days processed.")
         return
-
-    series = None if args.all_series else "EQ"
-    out = sync_nse_cm_parquet_range(
-        PARQUET_DATA_DIR,
-        start,
-        end,
-        client=client,
-        series=series,
-        overwrite=args.overwrite,
-        refresh_cache=args.refresh_cache,
-    )
     print(out["status"].value_counts().to_string())
     if "source" in out.columns:
         print("sources:", out["source"].value_counts().to_string())

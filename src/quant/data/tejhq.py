@@ -196,6 +196,106 @@ def latest_local_parquet_date(parquet_root: Path) -> date | None:
     return max(dates) if dates else None
 
 
+def parquet_candidate_paths(parquet_root: Path, day: date) -> list[Path]:
+    """Canonical TejHQ layout plus legacy hive-style folders."""
+    return [
+        nse_cm_parquet_path(parquet_root, day),
+        parquet_root / f"year={day.year}" / f"nse_cm_{day:%Y%m%d}.parquet",
+    ]
+
+
+def day_has_valid_parquet(parquet_root: Path, day: date) -> bool:
+    for path in parquet_candidate_paths(parquet_root, day):
+        ok, _ = parquet_day_is_valid(path, day)
+        if ok:
+            return True
+    return False
+
+
+def missing_weekdays(parquet_root: Path, start: date, end: date) -> list[date]:
+    return [d for d in iter_weekdays(start, end) if not day_has_valid_parquet(parquet_root, d)]
+
+
+def snapshot_cache_empty(cache_root: Path, day: date, exchange: str = "nse") -> bool | None:
+    """True = cached empty snapshot (non-trading). None = no cache yet."""
+    body = read_json_cache(snapshot_cache_path(cache_root, exchange, day))
+    if body is None:
+        return None
+    data = body.get("data", body if isinstance(body, list) else [])
+    if not isinstance(data, list):
+        return None
+    return len(data) == 0
+
+
+def manifest_non_trading_dates(manifest_path: Path) -> set[date]:
+    if not manifest_path.is_file():
+        return set()
+    df = pd.read_csv(manifest_path)
+    if "date" not in df.columns or "status" not in df.columns:
+        return set()
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    return set(df.loc[df["status"] == "no_rows", "date"].tolist())
+
+
+def classify_data_gaps(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    *,
+    cache_root: Path | None = None,
+    manifest_path: Path | None = None,
+) -> dict[str, list[date]]:
+    """
+    Split missing weekdays into sync gaps vs likely non-trading (holidays).
+
+    Non-trading: TejHQ returned no rows (manifest or empty snapshot cache).
+    """
+    cache_root = cache_root or TEJHQ_CACHE_DIR
+    manifest_path = manifest_path or TEJHQ_MANIFEST_PATH
+    missing = missing_weekdays(parquet_root, start, end)
+    holidays: set[date] = manifest_non_trading_dates(manifest_path)
+
+    gaps: list[date] = []
+    unknown: list[date] = []
+
+    for day in missing:
+        if day in holidays:
+            continue
+        empty = snapshot_cache_empty(cache_root, day)
+        if empty is True:
+            continue
+        if empty is None:
+            unknown.append(day)
+        gaps.append(day)
+
+    return {
+        "gaps": gaps,
+        "unknown_never_fetched": unknown,
+        "non_trading_skipped": sorted(holidays.intersection(missing)),
+        "missing_weekdays_total": missing,
+    }
+
+
+def gap_ranges(days: Sequence[date]) -> list[tuple[date, date, int]]:
+    """Merge consecutive calendar dates into [start, end, count] ranges."""
+    if not days:
+        return []
+    sorted_days = sorted(days)
+    ranges: list[tuple[date, date, int]] = []
+    start = prev = sorted_days[0]
+    count = 1
+    for d in sorted_days[1:]:
+        if (d - prev).days <= 3:  # allow weekend between trading gaps
+            count += 1
+            prev = d
+            continue
+        ranges.append((start, prev, count))
+        start = prev = d
+        count = 1
+    ranges.append((start, prev, count))
+    return ranges
+
+
 @dataclass
 class TejHQClient:
     api_key: str | None = None
@@ -454,6 +554,46 @@ def iter_weekdays(start: date, end: date) -> Iterable[date]:
         if d.weekday() < 5:
             yield d
         d += timedelta(days=1)
+
+
+def sync_nse_cm_missing_days(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    *,
+    client: TejHQClient | None = None,
+    series: str | None = "EQ",
+    overwrite: bool = False,
+    refresh_cache: bool = False,
+    dry_run: bool = False,
+) -> pd.DataFrame:
+    """Sync only weekdays with no valid parquet (any known layout)."""
+    missing = missing_weekdays(parquet_root, start, end)
+    if dry_run:
+        return pd.DataFrame({"date": missing, "status": ["would_sync"] * len(missing)})
+    client = client or TejHQClient()
+    rows: list[dict[str, Any]] = []
+    for day in missing:
+        try:
+            rows.append(
+                client.write_nse_cm_parquet(
+                    day,
+                    parquet_root,
+                    series=series,
+                    overwrite=overwrite,
+                    refresh_cache=refresh_cache,
+                )
+            )
+        except TejHQError as exc:
+            rows.append(
+                {
+                    "date": day,
+                    "status": f"error:{exc}",
+                    "source": "api",
+                    "path": str(nse_cm_parquet_path(parquet_root, day)),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def sync_nse_cm_parquet_range(

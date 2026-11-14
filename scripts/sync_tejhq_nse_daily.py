@@ -59,7 +59,41 @@ def main() -> None:
         help="Re-fetch from API and refresh gzip JSON caches",
     )
     parser.add_argument("--all-series", action="store_true", help="Keep BE/SM/etc., not EQ-only")
+    parser.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="Append progress to this file (default: metadata/tejhq_fill_gaps.log under QUANT_DATA_DIR)",
+    )
     args = parser.parse_args()
+
+    log_path = args.log
+    if log_path is None:
+        from quant.config import TEJHQ_MANIFEST_PATH
+
+        log_path = TEJHQ_MANIFEST_PATH.parent / "tejhq_fill_gaps.log"
+
+    class _Tee:
+        def __init__(self, stream, path: Path):
+            self._stream = stream
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = path.open("a", encoding="utf-8")
+
+        def write(self, data: str) -> int:
+            self._stream.write(data)
+            self._file.write(data)
+            self._file.flush()
+            return len(data)
+
+        def flush(self) -> None:
+            self._stream.flush()
+            self._file.flush()
+
+    import sys as _sys
+
+    _sys.stdout = _Tee(_sys.stdout, log_path)
+    _sys.stderr = _Tee(_sys.stderr, log_path)
+    print(f"Logging to {log_path}", flush=True)
 
     client = TejHQClient(api_key=TEJHQ_API_KEY)
     end = args.end or client.latest_trading_date() or date.today()

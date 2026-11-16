@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "3"  # bump when label/feature numerics change (invalidates caches)
+SIM_ENGINE_VERSION = "2"  # carry-forward MTM, suspension exits, trade log
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -346,3 +347,246 @@ def summarize_daily_metrics(daily: pd.DataFrame, k: int) -> dict[str, float]:
         f"pct_days_with_hit": float(daily["any_hit"].mean()),
         "n_days": int(len(daily)),
     }
+
+
+def transaction_cost(notional: float, side: str, cfg: dict) -> float:
+    c = cfg["costs"]
+    brokerage = notional * c["brokerage_bps"] / 10000
+    stt = notional * c["stt_bps"] / 10000 if side == "SELL" else 0
+    exchange = notional * c["exchange_bps"] / 10000
+    stamp = notional * c["stamp_bps"] / 10000 if side == "BUY" else 0
+    sebi = notional * c["sebi_bps"] / 10000
+    gst = (brokerage + exchange + sebi) * c["gst_rate"]
+    return brokerage + stt + exchange + stamp + sebi + gst
+
+
+def execution_price(px: float, side: str, cfg: dict) -> float:
+    slip = cfg["costs"]["slippage_bps"] / 10000
+    return px * (1 + slip) if side == "BUY" else px * (1 - slip)
+
+
+def sessions_held(entry_date, current_date, calendar: pd.DatetimeIndex) -> int:
+    i0 = calendar.get_indexer([pd.Timestamp(entry_date)])[0]
+    i1 = calendar.get_indexer([pd.Timestamp(current_date)])[0]
+    if i0 < 0 or i1 < 0:
+        return 0
+    return max(0, i1 - i0)
+
+
+def _portfolio_mtm(cash: float, positions: dict) -> float:
+    mtm = cash
+    for pos in positions.values():
+        mtm += pos["shares"] * pos["last_close"]
+    return mtm
+
+
+def equity_curve_metrics(eq: pd.DataFrame, initial_capital: float) -> dict[str, float]:
+    if eq.empty:
+        return {}
+    peak = eq["equity"].cummax()
+    dd = (eq["equity"] / peak - 1).min()
+    ret = eq["equity"].iloc[-1] / initial_capital - 1
+    rets = eq["equity"].pct_change().dropna()
+    sharpe = (
+        float(rets.mean() / rets.std() * np.sqrt(252))
+        if len(rets) > 1 and rets.std() > 0
+        else np.nan
+    )
+    return {
+        "total_return": float(ret),
+        "max_drawdown": float(dd),
+        "sharpe_daily_ann": sharpe,
+        "n_sessions": int(len(eq)),
+    }
+
+
+def enrich_equity_drawdown(eq: pd.DataFrame) -> pd.DataFrame:
+    out = eq.sort_values("Date").copy()
+    out["peak"] = out["equity"].cummax()
+    out["drawdown"] = out["equity"] / out["peak"] - 1
+    return out
+
+
+def report_equity_diagnostics(
+    eq: pd.DataFrame,
+    label: str,
+    initial_capital: float | None = None,
+) -> None:
+    """Print drawdown / worst-session diagnostics (matches notebook forensic snippet)."""
+    if eq.empty:
+        print(f"\n{label}: empty equity curve")
+        return
+    eq = enrich_equity_drawdown(eq)
+    ic = float(initial_capital) if initial_capital is not None else float(eq["equity"].iloc[0])
+    print(f"\n{label}")
+    print("Initial capital (denominator):", ic)
+    print("First session equity:", eq["equity"].iloc[0])
+    print("Last equity:", eq["equity"].iloc[-1])
+    print("Minimum equity:", eq["equity"].min())
+    print("Minimum drawdown:", eq["drawdown"].min())
+    print("Sessions below 50% of peak:", int((eq["drawdown"] < -0.50).sum()))
+    cols = ["Date", "equity", "peak", "drawdown", "n_pos"]
+    if "n_pos_no_bar" in eq.columns:
+        cols.append("n_pos_no_bar")
+    worst = eq.nsmallest(10, "equity")[cols]
+    print("\nWorst 10 sessions:")
+    print(worst.to_string(index=False))
+
+
+def simulate_topk_calendar(
+    features_df: pd.DataFrame,
+    panel_df: pd.DataFrame,
+    scores: Iterable[float] | np.ndarray | pd.Series,
+    top_k: int,
+    cfg: dict,
+    calendar: pd.DatetimeIndex,
+) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    """Top-K long-only simulator on a full trading calendar with carry-forward MTM."""
+    st = cfg["strategy"]
+    max_missing = int(st.get("max_missing_sessions", 10))
+    f = features_df.copy()
+    f["score"] = np.asarray(scores)
+    f["Date"] = pd.to_datetime(f["Date"])
+    dmin, dmax = f["Date"].min(), f["Date"].max()
+    dates = [d for d in calendar if dmin <= d <= dmax]
+    if len(dates) < 2:
+        return pd.DataFrame(), {}, pd.DataFrame()
+
+    cash = float(st["initial_capital"])
+    positions: dict = {}
+    equity_rows: list[dict] = []
+    trade_rows: list[dict] = []
+    n_trades = 0
+
+    for i in range(len(dates) - 1):
+        d, nxt = dates[i], dates[i + 1]
+        panel_nxt = panel_df.loc[panel_df["Date"] == nxt].set_index("Symbol")
+        n_no_bar = 0
+
+        for sym in list(positions):
+            pos = positions[sym]
+            if sym not in panel_nxt.index:
+                pos["missing_bars"] = pos.get("missing_bars", 0) + 1
+                n_no_bar += 1
+                if pos["missing_bars"] > max_missing:
+                    raw = pos["last_close"]
+                    if np.isfinite(raw) and raw > 0:
+                        px = execution_price(raw, "SELL", cfg)
+                        notional = pos["shares"] * px
+                        cash += notional - transaction_cost(notional, "SELL", cfg)
+                        trade_rows.append(
+                            {
+                                "Date": nxt,
+                                "Symbol": sym,
+                                "side": "SELL",
+                                "reason": "missing_bar",
+                                "px": px,
+                                "shares": pos["shares"],
+                                "notional": notional,
+                            }
+                        )
+                        del positions[sym]
+                        n_trades += 1
+                continue
+
+            row = panel_nxt.loc[sym]
+            opn, lo, cl = float(row["Open"]), float(row["Low"]), float(row["Close"])
+            pos["missing_bars"] = 0
+            if np.isfinite(cl) and cl > 0:
+                pos["last_close"] = cl
+                pos["last_mark_date"] = nxt
+
+            held = sessions_held(pos["entry_date"], nxt, calendar)
+            stop = pos["entry_px"] * (1 - st["stop_loss"])
+            sell = False
+            reason = ""
+            raw = np.nan
+            if np.isfinite(lo) and lo <= stop:
+                sell = True
+                reason = "stop"
+                raw = min(opn, stop) if np.isfinite(opn) else stop
+            elif held >= st["max_hold"]:
+                sell = True
+                reason = "max_hold"
+                raw = opn
+            if sell and np.isfinite(raw) and raw > 0:
+                px = execution_price(raw, "SELL", cfg)
+                notional = pos["shares"] * px
+                cash += notional - transaction_cost(notional, "SELL", cfg)
+                trade_rows.append(
+                    {
+                        "Date": nxt,
+                        "Symbol": sym,
+                        "side": "SELL",
+                        "reason": reason,
+                        "px": px,
+                        "shares": pos["shares"],
+                        "notional": notional,
+                    }
+                )
+                del positions[sym]
+                n_trades += 1
+
+        day = f.loc[f["Date"] == d].nlargest(top_k, "score")
+        slots = top_k - len(positions)
+        for _, r in day.iterrows():
+            if slots <= 0:
+                break
+            sym = r["Symbol"]
+            if sym in positions:
+                continue
+            if sym not in panel_nxt.index:
+                continue
+            nxt_row = panel_nxt.loc[sym]
+            opn = float(nxt_row["Open"])
+            prev_c = float(r["Close"])
+            if not np.isfinite(opn) or opn <= 0:
+                continue
+            if prev_c > 0 and opn >= prev_c * 1.195:
+                continue
+            vol = float(nxt_row["Volume"]) if np.isfinite(nxt_row["Volume"]) else 0
+            max_notional = vol * opn * st["max_participation_pct"]
+            alloc = cash / max(slots, 1)
+            notional = min(alloc, max_notional) if max_notional > 0 else alloc
+            px = execution_price(opn, "BUY", cfg)
+            shares = notional / px
+            cost = transaction_cost(notional, "BUY", cfg)
+            if cash < notional + cost:
+                continue
+            cash -= notional + cost
+            mark = float(nxt_row["Close"]) if np.isfinite(nxt_row["Close"]) and float(nxt_row["Close"]) > 0 else px
+            positions[sym] = {
+                "entry_px": px,
+                "shares": shares,
+                "entry_date": nxt,
+                "prev_close": prev_c,
+                "last_close": mark,
+                "last_mark_date": nxt,
+                "missing_bars": 0,
+            }
+            trade_rows.append(
+                {
+                    "Date": nxt,
+                    "Symbol": sym,
+                    "side": "BUY",
+                    "reason": "signal",
+                    "px": px,
+                    "shares": shares,
+                    "notional": notional,
+                }
+            )
+            slots -= 1
+            n_trades += 1
+
+        mtm = _portfolio_mtm(cash, positions)
+        equity_rows.append(
+            {"Date": nxt, "equity": mtm, "n_pos": len(positions), "n_pos_no_bar": n_no_bar}
+        )
+
+    eq = pd.DataFrame(equity_rows)
+    trades = pd.DataFrame(trade_rows)
+    if eq.empty:
+        return eq, {}, trades
+    stats_out = equity_curve_metrics(eq, float(st["initial_capital"]))
+    stats_out["n_trades"] = n_trades
+    return eq, stats_out, trades

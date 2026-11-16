@@ -215,6 +215,7 @@ def main() -> None:
         "from sklearn.isotonic import IsotonicRegression": "explosive_nb_ml.py",
         "def split_masks(df):": "explosive_nb_ml.py",
         "def transaction_cost": "explosive_nb_sim.py",
+        "from quant.research.explosive_research import (\n    SIM_ENGINE_VERSION,": "explosive_nb_sim.py",
         "_scan_fp = fingerprint_dict": "explosive_nb_scan.py",
         'with tqdm(total=4, desc="Phase 9 — scanner")': "explosive_nb_scan.py",
         "latest_date = panel_features": "explosive_nb_scan.py",

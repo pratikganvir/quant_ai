@@ -20,7 +20,7 @@ CELL_SCRIPT_PAIRS = [
     ("_pre_fp = fingerprint_dict", "explosive_nb_pre_event.py"),
     ("FAMILIES = {", "explosive_nb_helpers.py"),
     ("from sklearn.isotonic import IsotonicRegression", "explosive_nb_ml.py"),
-    ("def transaction_cost", "explosive_nb_sim.py"),
+    ("from quant.research.explosive_research import (\n    SIM_ENGINE_VERSION,", "explosive_nb_sim.py"),
     ("_scan_fp = fingerprint_dict", "explosive_nb_scan.py"),
 ]
 

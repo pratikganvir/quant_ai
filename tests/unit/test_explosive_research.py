@@ -13,6 +13,8 @@ from quant.research.explosive_research import (
     calendar_shift,
     daily_precision_lift,
     dedupe_event_episodes,
+    enrich_equity_drawdown,
+    equity_curve_metrics,
     fingerprint_dict,
     first_touch_triple_barrier,
     force_rerun_phase,
@@ -20,6 +22,7 @@ from quant.research.explosive_research import (
     mark_ca_suspect,
     phase_cache_hit,
     purge_overlaps_calendar,
+    simulate_topk_calendar,
     summarize_daily_metrics,
     trading_calendar_from_panel,
     write_phase_meta,
@@ -236,3 +239,98 @@ class TestForwardExcursionUsesCalendarNotRows:
         panel = daily_symbol_series("AAA", cal)
         out = forward_excursion_calendar(panel, cal, horizons=[5])
         assert np.isfinite(out.iloc[10]["mfe_5"])
+
+
+class TestSimulateTopKEquity:
+    def _minimal_cfg(self, initial: float = 100_000.0) -> dict:
+        return {
+            "costs": {
+                "slippage_bps": 0.0,
+                "brokerage_bps": 0.0,
+                "stt_bps": 0.0,
+                "exchange_bps": 0.0,
+                "stamp_bps": 0.0,
+                "sebi_bps": 0.0,
+                "gst_rate": 0.0,
+            },
+            "strategy": {
+                "max_hold": 50,
+                "stop_loss": 0.99,
+                "max_participation_pct": 1.0,
+                "initial_capital": initial,
+                "max_missing_sessions": 20,
+            },
+        }
+
+    def test_mtm_uses_last_close_when_next_bar_missing(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=5, freq="B"))
+        panel_days = [cal[0], cal[1], cal[3], cal[4]]
+        rows = []
+        for d in panel_days:
+            rows.append(
+                {
+                    "Date": d,
+                    "Symbol": "A",
+                    "Open": 100.0,
+                    "High": 100.0,
+                    "Low": 100.0,
+                    "Close": 100.0,
+                    "Volume": 1_000_000.0,
+                }
+            )
+        panel = pd.DataFrame(rows)
+        features = pd.DataFrame(
+            {
+                "Date": list(cal[:-1]),
+                "Symbol": ["A"] * (len(cal) - 1),
+                "Close": [100.0] * (len(cal) - 1),
+            }
+        )
+        scores = np.ones(len(cal) - 1)
+        eq, stats, _ = simulate_topk_calendar(
+            features, panel, scores, top_k=1, cfg=self._minimal_cfg(), calendar=cal
+        )
+        assert not eq.empty
+        miss = eq.loc[eq["Date"] == cal[2]]
+        assert not miss.empty
+        assert miss["equity"].iloc[0] >= 99_000.0
+        assert stats["max_drawdown"] > -0.05
+        assert stats["total_return"] > -0.05
+
+    def test_return_uses_initial_capital_not_first_equity(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=4, freq="B"))
+        panel = pd.DataFrame(
+            [
+                {
+                    "Date": d,
+                    "Symbol": "A",
+                    "Open": 100.0,
+                    "High": 100.0,
+                    "Low": 100.0,
+                    "Close": 100.0,
+                    "Volume": 1_000_000.0,
+                }
+                for d in cal[1:]
+            ]
+        )
+        features = pd.DataFrame(
+            {
+                "Date": list(cal[:-1]),
+                "Symbol": ["A"] * (len(cal) - 1),
+                "Close": [100.0] * (len(cal) - 1),
+            }
+        )
+        eq, stats, _ = simulate_topk_calendar(
+            features,
+            panel,
+            np.ones(len(cal) - 1),
+            top_k=1,
+            cfg=self._minimal_cfg(initial=1_000_000.0),
+            calendar=cal,
+        )
+        assert abs(stats["total_return"] - (eq["equity"].iloc[-1] / 1_000_000.0 - 1)) < 1e-9
+
+    def test_enrich_equity_drawdown(self):
+        eq = pd.DataFrame({"Date": pd.bdate_range("2025-01-01", periods=3), "equity": [100.0, 80.0, 90.0]})
+        out = enrich_equity_drawdown(eq)
+        assert out["drawdown"].min() == pytest.approx(-0.2)

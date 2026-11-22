@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "5"  # bump when label/feature numerics change (invalidates caches)
-SIM_ENGINE_VERSION = "6"  # optional no symbol re-entry; deduped legs
+SIM_ENGINE_VERSION = "7"  # re-entry after flat only; no same-session exit
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -776,12 +776,17 @@ def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
                 shares = float(open_buy["shares"])
                 entry_px = float(open_buy["px"])
                 exit_px = float(r["px"])
+                entry_d = pd.Timestamp(open_buy["Date"])
+                exit_d = pd.Timestamp(r["Date"])
+                if exit_d <= entry_d:
+                    open_buy = None
+                    continue
                 rows.append(
                     {
                         "symbol": str(sym),
-                        "trade_entry_date": open_buy["Date"],
+                        "trade_entry_date": entry_d,
                         "trade_entry_price": entry_px,
-                        "trade_exit_date": r["Date"],
+                        "trade_exit_date": exit_d,
                         "trade_exit_price": exit_px,
                         "profit_loss": (exit_px - entry_px) * shares,
                     }
@@ -790,6 +795,9 @@ def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows, columns=cols)
     if out.empty:
         return out
+    out["trade_entry_date"] = pd.to_datetime(out["trade_entry_date"])
+    out["trade_exit_date"] = pd.to_datetime(out["trade_exit_date"])
+    out = out.loc[out["trade_exit_date"] > out["trade_entry_date"]]
     return out.drop_duplicates(
         subset=[
             "symbol",
@@ -839,15 +847,14 @@ def simulate_topk_calendar(
     )
 
     cash = float(st["initial_capital"])
-    allow_reentry = bool(st.get("allow_symbol_reentry", False))
     positions: dict = {}
-    symbols_traded: set[str] = set()
     last_exit_idx: dict[str, int] = {}
+    min_hold = int(st.get("min_hold_sessions", 1))
     equity_rows: list[dict] = []
     trade_rows: list[dict] = []
     n_trades = 0
     cal_index = {pd.Timestamp(d): i for i, d in enumerate(calendar)}
-    reentry_cd = int(st.get("reentry_cooldown_sessions", st["max_hold"]))
+    reentry_cd = int(st.get("reentry_cooldown_sessions", 0))
 
     for i in range(len(dates) - 1):
         d, nxt = dates[i], dates[i + 1]
@@ -868,6 +875,8 @@ def simulate_topk_calendar(
                 pos["missing_bars"] = pos.get("missing_bars", 0) + 1
                 n_no_bar += 1
                 if pos["missing_bars"] > max_missing:
+                    if pd.Timestamp(nxt) <= pd.Timestamp(pos["entry_date"]):
+                        continue
                     raw = pos["last_close"]
                     if np.isfinite(raw) and raw > 0:
                         px = execution_price(raw, "SELL", cfg)
@@ -908,10 +917,16 @@ def simulate_topk_calendar(
                 sell = True
                 reason = "stop"
                 raw = min(opn, stop) if np.isfinite(opn) else stop
-            elif held >= st["max_hold"]:
+            elif held >= st["max_hold"] and held >= min_hold:
                 sell = True
                 reason = "max_hold"
                 raw = opn
+            exit_ts = pd.Timestamp(nxt)
+            entry_ts = pd.Timestamp(pos["entry_date"])
+            if sell and exit_ts <= entry_ts:
+                sell = False
+            if sell and held < min_hold and reason != "stop":
+                sell = False
             if sell and np.isfinite(raw) and raw > 0:
                 px = execution_price(raw, "SELL", cfg)
                 notional = pos["shares"] * px
@@ -943,8 +958,6 @@ def simulate_topk_calendar(
             sym = normalize_symbol(r["Symbol"])
             if sym in positions:
                 continue
-            if not allow_reentry and sym in symbols_traded:
-                continue
             last_x = last_exit_idx.get(sym)
             if last_x is not None and nxt_idx >= 0 and (nxt_idx - last_x) < reentry_cd:
                 continue
@@ -969,7 +982,6 @@ def simulate_topk_calendar(
                 continue
             cash -= notional + cost
             mark = float(nxt_row["Close"]) if np.isfinite(nxt_row["Close"]) and float(nxt_row["Close"]) > 0 else px
-            symbols_traded.add(sym)
             positions[sym] = {
                 "entry_px": px,
                 "shares": shares,

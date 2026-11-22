@@ -390,8 +390,8 @@ class TestSimulateTopKEquity:
         buys = trades.loc[trades["side"] == "BUY", "Symbol"].astype(str)
         assert (buys == "A").sum() == 1
 
-    def test_no_symbol_reentry_when_disabled(self):
-        cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=30, freq="B"))
+    def test_reentry_after_previous_trade_closed(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=12, freq="B"))
         panel = pd.DataFrame(
             [
                 {
@@ -414,12 +414,7 @@ class TestSimulateTopKEquity:
             }
         )
         cfg = self._minimal_cfg()
-        cfg["strategy"] = {
-            **cfg["strategy"],
-            "max_hold": 2,
-            "stop_loss": 0.99,
-            "allow_symbol_reentry": False,
-        }
+        cfg["strategy"] = {**cfg["strategy"], "max_hold": 2, "stop_loss": 0.99, "min_hold_sessions": 1}
         _, _, trades = simulate_topk_calendar(
             features,
             panel,
@@ -428,8 +423,17 @@ class TestSimulateTopKEquity:
             cfg=cfg,
             calendar=cal,
         )
-        buys = trades.loc[trades["side"] == "BUY", "Symbol"].astype(str)
-        assert (buys == "A").sum() == 1
+        buys = trades.loc[trades["side"] == "BUY"]
+        assert (buys["Symbol"].astype(str) == "A").sum() >= 2
+
+    def test_round_trips_drop_same_day_exit(self):
+        trades = pd.DataFrame(
+            [
+                {"Symbol": "AAA", "Date": "2025-01-07", "side": "BUY", "px": 100.0, "shares": 10.0},
+                {"Symbol": "AAA", "Date": "2025-01-07", "side": "SELL", "px": 99.0, "shares": 10.0},
+            ]
+        )
+        assert trades_to_round_trips(trades).empty
 
     def test_return_uses_initial_capital_not_first_equity(self):
         cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=4, freq="B"))

@@ -50,7 +50,8 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
         "strategy": {
             "top_k": (10, 20),
             "prob_threshold": 0.25,
-            "max_hold": 20,
+            # None = no calendar exit; hold until stop_loss or missing_bar only.
+            "max_hold": None,
             "min_hold_sessions": 1,
             "reentry_cooldown_sessions": 0,
             "stop_loss": 0.10,

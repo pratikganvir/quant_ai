@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "5"  # bump when label/feature numerics change (invalidates caches)
-SIM_ENGINE_VERSION = "7"  # re-entry after flat only; no same-session exit
+SIM_ENGINE_VERSION = "8"  # optional max_hold (None = no time-based exit)
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -850,6 +850,8 @@ def simulate_topk_calendar(
     positions: dict = {}
     last_exit_idx: dict[str, int] = {}
     min_hold = int(st.get("min_hold_sessions", 1))
+    max_hold_raw = st.get("max_hold")
+    max_hold = int(max_hold_raw) if max_hold_raw not in (None, "", 0) else None
     equity_rows: list[dict] = []
     trade_rows: list[dict] = []
     n_trades = 0
@@ -917,7 +919,7 @@ def simulate_topk_calendar(
                 sell = True
                 reason = "stop"
                 raw = min(opn, stop) if np.isfinite(opn) else stop
-            elif held >= st["max_hold"] and held >= min_hold:
+            elif max_hold is not None and held >= max_hold and held >= min_hold:
                 sell = True
                 reason = "max_hold"
                 raw = opn

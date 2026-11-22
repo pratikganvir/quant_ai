@@ -16,9 +16,10 @@ FIX_SCRIPT = SCRIPTS / "fix_explosive_nb.py"
 # (notebook cell start prefix, script file basename without path)
 CELL_SCRIPT_PAIRS = [
     ("import os", "explosive_nb_events.py"),
-    ("def compute_panel_features", "explosive_nb_phase5.py"),
+    ("from quant.research.explosive_research import feature_column_names", "explosive_nb_phase5.py"),
     ("_pre_fp = fingerprint_dict", "explosive_nb_pre_event.py"),
-    ("FAMILIES = {", "explosive_nb_helpers.py"),
+
+    ("from quant.research.explosive_research import load_feature_dataset_artifacts", "explosive_nb_helpers.py"),
     ("from sklearn.isotonic import IsotonicRegression", "explosive_nb_ml.py"),
     ("from quant.research.explosive_research import (\n    SIM_ENGINE_VERSION,", "explosive_nb_sim.py"),
     ('"""Phase 8.1.0 — trading calendar validation', "explosive_nb_phase810.py"),

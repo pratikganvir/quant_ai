@@ -247,10 +247,10 @@ def main() -> None:
     replacements = {
         "import os\nfrom concurrent.futures import ProcessPoolExecutor": "explosive_nb_events.py",
         "def compute_features": "explosive_nb_phase5.py",
-        "def compute_panel_features": "explosive_nb_phase5.py",
+        "from quant.research.explosive_research import feature_column_names": "explosive_nb_phase5.py",
         "_pre_fp = fingerprint_dict": "explosive_nb_pre_event.py",
         "rng = np.random.default_rng": "explosive_nb_pre_event.py",
-        "FAMILIES = {": "explosive_nb_helpers.py",
+        "from quant.research.explosive_research import load_feature_dataset_artifacts": "explosive_nb_helpers.py",
         "_ml_fp = fingerprint_dict": "explosive_nb_ml.py",
         "from sklearn.isotonic import IsotonicRegression": "explosive_nb_ml.py",
         "def split_masks(df):": "explosive_nb_ml.py",

@@ -1,3 +1,16 @@
+from quant.research.explosive_research import load_feature_dataset_artifacts
+
+if not (globals().get("feature_cols") and globals().get("features") is not None):
+    _feat_ctx = load_feature_dataset_artifacts(FEATURES_PATH, PANEL_FEATURES_PATH)
+    globals().update(_feat_ctx)
+    print(
+        "Hydrated Phase 5 from disk:",
+        len(_feat_ctx["feature_cols"]),
+        "features,",
+        len(_feat_ctx["features"]),
+        "rows",
+    )
+
 FAMILIES = {
     "E1_volume": [c for c in feature_cols if c.startswith("vol_")],
     "E2_volatility": [c for c in feature_cols if c.startswith("vola_")],

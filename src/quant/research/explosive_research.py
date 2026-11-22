@@ -425,6 +425,39 @@ def read_meta_fingerprint(meta_path: Path) -> str:
         return ""
 
 
+FEATURE_COL_PREFIXES = ("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_")
+
+
+def feature_column_names(columns: Iterable[str]) -> list[str]:
+    return [c for c in columns if c.startswith(FEATURE_COL_PREFIXES)]
+
+
+def load_feature_dataset_artifacts(
+    features_path: Path,
+    panel_features_path: Path | None = None,
+) -> dict[str, pd.DataFrame | list[str]]:
+    """Load Phase 5 parquet outputs (resume / out-of-order notebook execution)."""
+    if not features_path.exists():
+        raise FileNotFoundError(f"Missing features parquet: {features_path}")
+    features = pd.read_parquet(features_path)
+    features["Date"] = pd.to_datetime(features["Date"])
+    panel_features = None
+    if panel_features_path is not None and panel_features_path.exists():
+        panel_features = pd.read_parquet(panel_features_path)
+        panel_features["Date"] = pd.to_datetime(panel_features["Date"])
+    src_cols = panel_features.columns if panel_features is not None else features.columns
+    feature_cols = feature_column_names(src_cols)
+    label_cols = [c for c in features.columns if c.startswith("y_")]
+    out: dict[str, pd.DataFrame | list[str]] = {
+        "features": features,
+        "feature_cols": feature_cols,
+        "label_cols": label_cols,
+    }
+    if panel_features is not None:
+        out["panel_features"] = panel_features
+    return out
+
+
 def label_cfg_fingerprint(cfg: dict) -> str:
     base = {k: cfg[k] for k in LABEL_CFG_KEYS if k in cfg}
     base["engine"] = LABEL_ENGINE_VERSION

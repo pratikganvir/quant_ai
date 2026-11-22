@@ -1,3 +1,6 @@
+from quant.research.explosive_research import feature_column_names
+
+
 def compute_panel_features(panel_df, nifty_df=None):
     """Rolling features on the full tradable panel (labels merged later)."""
     x = panel_df.sort_values(["Symbol", "Date"]).copy()
@@ -91,18 +94,14 @@ _features_fp = fingerprint_dict(
 if phase_cache_hit(CFG, "features", [FEATURES_PATH, PANEL_FEATURES_PATH], FEATURES_META_PATH, _features_fp):
     panel_features = pd.read_parquet(PANEL_FEATURES_PATH)
     features = pd.read_parquet(FEATURES_PATH)
-    feature_cols = [
-        c for c in panel_features.columns if c.startswith(("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_"))
-    ]
+    feature_cols = feature_column_names(panel_features.columns)
     label_cols = [c for c in features.columns if c.startswith("y_")]
     print("Loaded features:", panel_features.shape, features.shape)
 else:
     with tqdm(total=3, desc="Phase 5 — feature dataset") as pbar:
         panel_features = compute_panel_features(panel, nifty)
         pbar.update(1)
-        feature_cols = [
-            c for c in panel_features.columns if c.startswith(("vol_", "vola_", "px_", "deliv_", "liq_", "rs_", "mkt_"))
-        ]
+        feature_cols = feature_column_names(panel_features.columns)
         features = attach_event_labels(panel_features, events)
         pbar.update(1)
         label_cols = [c for c in features.columns if c.startswith("y_")]

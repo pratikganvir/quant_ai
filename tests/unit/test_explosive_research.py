@@ -17,8 +17,10 @@ from quant.research.explosive_research import (
     dedupe_event_episodes,
     enrich_equity_drawdown,
     equity_curve_metrics,
+    feature_column_names,
     fingerprint_dict,
     first_touch_triple_barrier,
+    load_feature_dataset_artifacts,
     force_rerun_phase,
     forward_excursion_calendar,
     mark_ca_suspect,
@@ -38,6 +40,29 @@ from tests.unit.explosive_fixtures import (
     triple_barrier_panel,
     two_symbol_panel_with_gap,
 )
+
+
+class TestFeatureArtifacts:
+    def test_feature_column_names(self):
+        cols = ["px_ret_5", "Close", "vol_rvol_20", "y_explosive_20"]
+        assert feature_column_names(cols) == ["px_ret_5", "vol_rvol_20"]
+
+    def test_load_feature_dataset_artifacts(self, tmp_path):
+        import pandas as pd
+
+        feats = pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2020-01-01"]),
+                "Symbol": ["A"],
+                "vol_x": [1.0],
+                "y_explosive_20": [0],
+            }
+        )
+        fp = tmp_path / "features.parquet"
+        feats.to_parquet(fp, index=False)
+        ctx = load_feature_dataset_artifacts(fp)
+        assert ctx["feature_cols"] == ["vol_x"]
+        assert len(ctx["features"]) == 1
 
 
 class TestTradingCalendar:

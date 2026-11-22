@@ -1,7 +1,9 @@
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from quant.research.explosive_research import explosive_mfe_threshold
+
+def explosive_mfe_threshold(cfg):
+    return float(cfg["primary_mfe_thresh"])
 
 
 def add_labels(df, cfg):

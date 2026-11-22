@@ -179,6 +179,46 @@ def _patch_cell4(nb) -> None:
     nb["cells"][idx]["source"] = [cell4[start:end].strip() + "\n"]
 
 
+def _insert_phase810_cells(nb) -> None:
+    marker = "Phase 8.1.0 — Trading Calendar"
+    for c in nb["cells"]:
+        if c["cell_type"] == "markdown" and marker in "".join(c.get("source", [])):
+            return
+    phase9_idx = next(
+        (
+            i
+            for i, c in enumerate(nb["cells"])
+            if c["cell_type"] == "markdown" and "## Phase 9" in "".join(c.get("source", []))
+        ),
+        None,
+    )
+    if phase9_idx is None:
+        return
+    path = SCRIPTS / "explosive_nb_phase810.py"
+    if not path.exists():
+        return
+    md = {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## Phase 8.1.0 — Trading Calendar & Missing-Bar Forensics\n",
+            "\n",
+            "Investigate Phase 8 `missing_bar` exits before strategy optimization: calendar validation, "
+            "per-session classification, affected-trade forensics, and panel-union vs NIFTY-backed "
+            "comparative simulation.\n",
+        ],
+    }
+    code = {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [path.read_text().strip() + "\n"],
+    }
+    nb["cells"].insert(phase9_idx, code)
+    nb["cells"].insert(phase9_idx, md)
+
+
 def _patch_markdown(nb) -> None:
     for c in nb["cells"]:
         if c["cell_type"] != "markdown":
@@ -216,6 +256,7 @@ def main() -> None:
         "def split_masks(df):": "explosive_nb_ml.py",
         "def transaction_cost": "explosive_nb_sim.py",
         "from quant.research.explosive_research import (\n    SIM_ENGINE_VERSION,": "explosive_nb_sim.py",
+        '"""Phase 8.1.0 — trading calendar validation': "explosive_nb_phase810.py",
         "_scan_fp = fingerprint_dict": "explosive_nb_scan.py",
         'with tqdm(total=4, desc="Phase 9 — scanner")': "explosive_nb_scan.py",
         "latest_date = panel_features": "explosive_nb_scan.py",
@@ -230,6 +271,8 @@ def main() -> None:
         except KeyError:
             continue
         nb["cells"][idx]["source"] = [path.read_text() + "\n"]
+
+    _insert_phase810_cells(nb)
 
     NB.write_text(json.dumps(nb, indent=1))
     print("updated", NB)

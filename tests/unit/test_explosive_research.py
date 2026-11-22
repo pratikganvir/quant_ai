@@ -9,8 +9,10 @@ import pytest
 from pathlib import Path
 
 from quant.research.explosive_research import (
+    build_exchange_session_registry,
     ca_invalidates_forward_window,
     calendar_shift,
+    classify_calendar_gap,
     daily_precision_lift,
     dedupe_event_episodes,
     enrich_equity_drawdown,
@@ -22,6 +24,7 @@ from quant.research.explosive_research import (
     mark_ca_suspect,
     phase_cache_hit,
     purge_overlaps_calendar,
+    refined_trading_calendar,
     simulate_topk_calendar,
     summarize_daily_metrics,
     trading_calendar_from_panel,
@@ -334,3 +337,68 @@ class TestSimulateTopKEquity:
         eq = pd.DataFrame({"Date": pd.bdate_range("2025-01-01", periods=3), "equity": [100.0, 80.0, 90.0]})
         out = enrich_equity_drawdown(eq)
         assert out["drawdown"].min() == pytest.approx(-0.2)
+
+    def test_missing_bar_not_counted_on_non_valid_sessions(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=5, freq="B"))
+        ghost = cal[2]
+        valid = pd.DatetimeIndex([d for d in cal if d != ghost])
+        rows = []
+        for d in valid:
+            rows.append(
+                {
+                    "Date": d,
+                    "Symbol": "A",
+                    "Open": 100.0,
+                    "High": 100.0,
+                    "Low": 100.0,
+                    "Close": 100.0,
+                    "Volume": 1_000_000.0,
+                }
+            )
+        panel = pd.DataFrame(rows)
+        features = pd.DataFrame(
+            {
+                "Date": list(cal[:-1]),
+                "Symbol": ["A"] * (len(cal) - 1),
+                "Close": [100.0] * (len(cal) - 1),
+            }
+        )
+        scores = np.ones(len(cal) - 1)
+        cfg = {
+            **self._minimal_cfg(),
+            "strategy": {
+                **self._minimal_cfg()["strategy"],
+                "max_hold": 100,
+                "max_missing_sessions": 0,
+            },
+        }
+        _, _, trades_bad = simulate_topk_calendar(
+            features, panel, scores, top_k=1, cfg=cfg, calendar=cal
+        )
+        _, _, trades_ok = simulate_topk_calendar(
+            features,
+            panel,
+            scores,
+            top_k=1,
+            cfg=cfg,
+            calendar=cal,
+            missing_bar_sessions=valid,
+        )
+        assert not trades_bad.empty
+        assert (trades_bad["reason"] == "missing_bar").any()
+        if not trades_ok.empty and "reason" in trades_ok.columns:
+            assert not (trades_ok["reason"] == "missing_bar").any()
+
+
+class TestExchangeSessionRegistry:
+    def test_weekend_in_panel_union_is_not_valid(self):
+        sat = pd.Timestamp("2025-01-11")
+        assert sat.weekday() == 5
+        cal = pd.bdate_range("2025-01-06", periods=5, freq="B")
+        panel = daily_symbol_series("AAA", cal)
+        panel = pd.concat([panel, daily_symbol_series("BBB", pd.DatetimeIndex([sat]))])
+        reg = build_exchange_session_registry(panel, None)
+        assert not bool(reg.loc[reg["Date"] == sat, "is_valid_session"].iloc[0])
+        assert classify_calendar_gap(reg, sat) == "B"
+        refined = refined_trading_calendar(reg)
+        assert sat not in set(refined)

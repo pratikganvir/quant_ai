@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "3"  # bump when label/feature numerics change (invalidates caches)
-SIM_ENGINE_VERSION = "2"  # carry-forward MTM, suspension exits, trade log
+SIM_ENGINE_VERSION = "3"  # optional missing-bar gating on validated exchange sessions
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -28,6 +28,138 @@ LABEL_CFG_KEYS = (
 
 def trading_calendar_from_panel(panel: pd.DataFrame) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(sorted(pd.to_datetime(panel["Date"].unique())))
+
+
+MISSING_BAR_CLASS_LABELS = {
+    "A": "exchange_holiday",
+    "B": "weekend",
+    "C": "valid_session_no_stock_bar",
+    "D": "suspension",
+    "E": "illiquid_no_trade",
+    "F": "symbol_change_or_discontinued",
+    "G": "data_ingestion_failure",
+    "H": "unknown",
+}
+
+
+def build_exchange_session_registry(
+    panel: pd.DataFrame,
+    nifty_df: pd.DataFrame | None = None,
+    *,
+    breadth_frac: float = 0.35,
+) -> pd.DataFrame:
+    """Date-level market registry from panel union; NIFTY is the authoritative session anchor."""
+    panel = panel.copy()
+    panel["Date"] = pd.to_datetime(panel["Date"])
+    by_date = panel.groupby("Date", observed=True).agg(
+        n_symbols=("Symbol", "nunique"),
+        n_volume_positive=("Volume", lambda s: int((pd.to_numeric(s, errors="coerce") > 0).sum())),
+    )
+    panel_cal = pd.DatetimeIndex(sorted(panel["Date"].unique()))
+    nifty_dates: set[pd.Timestamp] = set()
+    if nifty_df is not None and not nifty_df.empty:
+        nifty_dates = set(pd.to_datetime(nifty_df["Date"].unique()))
+    med_syms = float(by_date["n_symbols"].median()) if not by_date.empty else 0.0
+    breadth_floor = max(50.0, med_syms * breadth_frac)
+    rows: list[dict] = []
+    for d in panel_cal:
+        d = pd.Timestamp(d)
+        stats = by_date.loc[d] if d in by_date.index else None
+        n_sym = int(stats["n_symbols"]) if stats is not None else 0
+        n_vol = int(stats["n_volume_positive"]) if stats is not None else 0
+        is_weekend = d.weekday() >= 5
+        has_nifty = d in nifty_dates
+        is_broad = n_sym >= breadth_floor
+        # Valid NSE cash session: benchmark index printed a bar, or panel breadth is normal on a weekday.
+        is_valid = (not is_weekend) and (has_nifty or is_broad)
+        if is_weekend:
+            session_type = "weekend"
+        elif has_nifty and is_broad:
+            session_type = "regular"
+        elif has_nifty and not is_broad:
+            session_type = "muhurat_or_partial"
+        elif (not has_nifty) and is_broad:
+            session_type = "panel_wide_no_nifty"
+        elif (not has_nifty) and n_sym > 0:
+            session_type = "thin_panel"
+        else:
+            session_type = "ghost_date"
+        rows.append(
+            {
+                "Date": d,
+                "weekday": d.weekday(),
+                "n_panel_symbols": n_sym,
+                "n_volume_positive": n_vol,
+                "nifty_session": has_nifty,
+                "is_broad_panel": is_broad,
+                "is_valid_session": is_valid,
+                "session_type": session_type,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+
+
+def refined_trading_calendar(registry: pd.DataFrame) -> pd.DatetimeIndex:
+    """Authoritative session index: NIFTY-backed when available, else breadth-filtered weekdays."""
+    ok = registry.loc[registry["is_valid_session"], "Date"]
+    return pd.DatetimeIndex(pd.to_datetime(ok).sort_values())
+
+
+def classify_calendar_gap(registry: pd.DataFrame, d: pd.Timestamp) -> str:
+    """Classify a panel-calendar date that is not a validated exchange session."""
+    d = pd.Timestamp(d)
+    hit = registry.loc[registry["Date"] == d]
+    if hit.empty:
+        return "H"
+    row = hit.iloc[0]
+    if row["weekday"] >= 5:
+        return "B"
+    if not row["nifty_session"] and not row["is_broad_panel"]:
+        return "A"
+    if not row["nifty_session"] and row["n_panel_symbols"] < 50:
+        return "G"
+    return "H"
+
+
+def classify_stock_absence(
+    symbol: str,
+    d: pd.Timestamp,
+    panel: pd.DataFrame,
+    registry: pd.DataFrame,
+    *,
+    suspension_gap_sessions: int = 5,
+) -> str:
+    """Classify a missing symbol bar on a validated market session."""
+    d = pd.Timestamp(d)
+    reg = registry.loc[registry["Date"] == d]
+    if not reg.empty and not bool(reg.iloc[0]["is_valid_session"]):
+        return classify_calendar_gap(registry, d)
+    sym = panel.loc[panel["Symbol"].astype(str) == str(symbol)].copy()
+    if sym.empty:
+        return "F"
+    sym["Date"] = pd.to_datetime(sym["Date"])
+    sym = sym.sort_values("Date")
+    if d in set(sym["Date"]):
+        return "C"
+    prior_rows = sym.loc[sym["Date"] < d]
+    future_rows = sym.loc[sym["Date"] > d]
+    if prior_rows.empty:
+        return "C"
+    if future_rows.empty:
+        return "F"
+    prior = pd.Timestamp(prior_rows["Date"].iloc[-1])
+    future = pd.Timestamp(future_rows["Date"].iloc[0])
+    gap_reg = registry.loc[
+        (registry["Date"] > prior)
+        & (registry["Date"] < future)
+        & registry["is_valid_session"]
+    ]
+    if len(gap_reg) >= suspension_gap_sessions:
+        return "D"
+    vol = pd.to_numeric(prior_rows["Volume"].iloc[-1], errors="coerce")
+    if not np.isfinite(vol) or vol <= 0:
+        return "E"
+    return "C"
 
 
 def calendar_shift(cal: pd.DatetimeIndex, dates: pd.Series, n: int) -> pd.Series:
@@ -440,6 +572,8 @@ def simulate_topk_calendar(
     top_k: int,
     cfg: dict,
     calendar: pd.DatetimeIndex,
+    *,
+    missing_bar_sessions: pd.DatetimeIndex | None = None,
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
     """Top-K long-only simulator on a full trading calendar with carry-forward MTM."""
     st = cfg["strategy"]
@@ -451,6 +585,12 @@ def simulate_topk_calendar(
     dates = [d for d in calendar if dmin <= d <= dmax]
     if len(dates) < 2:
         return pd.DataFrame(), {}, pd.DataFrame()
+
+    countable_missing = (
+        set(pd.to_datetime(missing_bar_sessions))
+        if missing_bar_sessions is not None
+        else None
+    )
 
     cash = float(st["initial_capital"])
     positions: dict = {}
@@ -466,6 +606,8 @@ def simulate_topk_calendar(
         for sym in list(positions):
             pos = positions[sym]
             if sym not in panel_nxt.index:
+                if countable_missing is not None and nxt not in countable_missing:
+                    continue
                 pos["missing_bars"] = pos.get("missing_bars", 0) + 1
                 n_no_bar += 1
                 if pos["missing_bars"] > max_missing:

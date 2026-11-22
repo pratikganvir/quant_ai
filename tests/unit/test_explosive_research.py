@@ -17,6 +17,7 @@ from quant.research.explosive_research import (
     daily_precision_lift,
     dedupe_event_episodes,
     enrich_equity_drawdown,
+    explosive_mfe_threshold,
     equity_curve_metrics,
     feature_column_names,
     fingerprint_dict,
@@ -42,6 +43,11 @@ from tests.unit.explosive_fixtures import (
     triple_barrier_panel,
     two_symbol_panel_with_gap,
 )
+
+
+class TestExplosiveLabelThreshold:
+    def test_threshold_from_cfg(self):
+        assert explosive_mfe_threshold({"primary_mfe_thresh": 0.25}) == 0.25
 
 
 class TestSymbolContinuity:

@@ -10,7 +10,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-LABEL_ENGINE_VERSION = "3"  # bump when label/feature numerics change (invalidates caches)
+LABEL_ENGINE_VERSION = "5"  # bump when label/feature numerics change (invalidates caches)
 SIM_ENGINE_VERSION = "3"  # optional missing-bar gating on validated exchange sessions
 
 LABEL_CFG_KEYS = (
@@ -20,10 +20,12 @@ LABEL_CFG_KEYS = (
     "primary_mfe_thresh",
     "ca_gap_abs_exclude",
     "triple_barrier",
-    "extra_thresholds",
-    "sustained_retention",
-    "event_thresholds",
 )
+
+
+def explosive_mfe_threshold(cfg: dict) -> float:
+    """Minimum forward MFE (fraction) that defines a positive explosive label."""
+    return float(cfg["primary_mfe_thresh"])
 
 
 def trading_calendar_from_panel(panel: pd.DataFrame) -> pd.DatetimeIndex:

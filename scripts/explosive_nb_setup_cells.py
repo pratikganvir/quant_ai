@@ -16,11 +16,11 @@ from tqdm.auto import tqdm
 CELL4_SOURCE = """
 with tqdm(total=1, desc="Phase 0 — config") as pbar:
     CFG = {
-        "horizons": [5, 10, 20],
+        # Forward window for MFE measurement (not a "must move within N days" speed rule).
+        "primary_horizon": 20,
         "h_max": 20,
-        "event_thresholds": {"E1": (0.10, 5), "E2": (0.20, 10), "E3": (0.20, 20)},
-        "extra_thresholds": [0.40, 0.50, 1.00],
-        "sustained_retention": {5: 0.05, 10: 0.10, 20: 0.10},
+        "horizons": [20],
+        "primary_mfe_thresh": 2.0,
         "triple_barrier": {"up": 0.20, "down": -0.10},
         "min_price": 20.0,
         "min_history_bars": 60,
@@ -31,8 +31,6 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
         "event_episode_gap": 10,
         "match_k": 3,
         "random_seed": 42,
-        "primary_horizon": 20,
-        "primary_mfe_thresh": 0.20,
         "ca_gap_abs_exclude": 0.35,
         "wf_splits": {
             "train_end": 2018,

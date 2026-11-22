@@ -1,22 +1,16 @@
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-def mfe_threshold_for_horizon(H, cfg):
-    thr_map = {h: t for t, h in cfg["event_thresholds"].values()}
-    if H == cfg["primary_horizon"]:
-        return cfg["primary_mfe_thresh"]
-    return thr_map.get(H, cfg["primary_mfe_thresh"])
+from quant.research.explosive_research import explosive_mfe_threshold
 
 
 def add_labels(df, cfg):
     df = df.copy()
-    for H in tqdm(cfg["horizons"], desc="Apply y labels", leave=False):
-        thr = mfe_threshold_for_horizon(H, cfg)
-        mfe, ret = df[f"mfe_{H}"], df[f"ret_{H}"]
-        ok = mfe.notna() & df[f"horizon_complete_{H}"] & ~df[f"ca_fwd_invalid_{H}"]
-        df[f"y_explosive_{H}"] = ((mfe >= thr) & ok).astype("int8")
-        sustain = cfg["sustained_retention"].get(H, 0.10)
-        df[f"y_sustained_{H}"] = ((mfe >= thr) & (ret >= sustain) & ok).astype("int8")
+    H = int(cfg["primary_horizon"])
+    thr = explosive_mfe_threshold(cfg)
+    mfe = df[f"mfe_{H}"]
+    ok = mfe.notna() & df[f"horizon_complete_{H}"] & ~df[f"ca_fwd_invalid_{H}"]
+    df[f"y_explosive_{H}"] = ((mfe >= thr) & ok).astype("int8")
     return df
 
 
@@ -67,13 +61,9 @@ else:
         bar.update(1)
 
     H = CFG["primary_horizon"]
-    mfe = labeled[f"mfe_{H}"]
-    ok = mfe.notna() & labeled[f"horizon_complete_{H}"] & ~labeled[f"ca_fwd_invalid_{H}"]
-    for xt in tqdm(CFG["extra_thresholds"], desc="Extra MFE thresholds", leave=False):
-        labeled[f"y_mfe{int(xt*100)}_{H}"] = ((mfe >= xt) & ok).astype("int8")
     labeled["ca_excluded"] = labeled["ca_suspect"].astype("int8")
 
-    print("Primary threshold:", mfe_threshold_for_horizon(CFG["primary_horizon"], CFG))
+    print("Explosive label: MFE >=", explosive_mfe_threshold(CFG), f"within {H} forward sessions (window only)")
     print("Incomplete horizons:", int((~labeled[f"horizon_complete_{CFG['h_max']}"]).sum()))
     print("CA-forward invalid:", int(labeled[f"ca_fwd_invalid_{CFG['h_max']}"].sum()))
 

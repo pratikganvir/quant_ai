@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "5"  # bump when label/feature numerics change (invalidates caches)
-SIM_ENGINE_VERSION = "4"  # symbol-normalized positions; no duplicate entry while held
+SIM_ENGINE_VERSION = "5"  # deduped panel bars, reentry cooldown, deduped trade log
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -719,6 +719,32 @@ def normalize_symbol(sym) -> str:
     return str(sym).strip().upper()
 
 
+def dedupe_trade_legs(trades: pd.DataFrame) -> pd.DataFrame:
+    """Drop repeated identical legs (common when panel had duplicate Date–Symbol rows)."""
+    if trades is None or trades.empty:
+        return trades
+    need = {"Symbol", "Date", "side", "px", "shares"}
+    if not need.issubset(trades.columns):
+        return trades
+    t = trades.copy()
+    t["Symbol"] = t["Symbol"].map(normalize_symbol)
+    t["Date"] = pd.to_datetime(t["Date"])
+    t["side"] = t["side"].astype(str).str.upper()
+    return t.drop_duplicates(
+        subset=["Date", "Symbol", "side", "px", "shares"],
+        keep="first",
+    ).sort_values(["Symbol", "Date", "side"], kind="mergesort")
+
+
+def _panel_bar(panel_day: pd.DataFrame, sym: str) -> pd.Series | None:
+    if sym not in panel_day.index:
+        return None
+    hit = panel_day.loc[sym]
+    if isinstance(hit, pd.DataFrame):
+        hit = hit.iloc[-1]
+    return hit
+
+
 def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
     """Pair BUY/SELL legs (FIFO per symbol) into closed round trips for export."""
     cols = [
@@ -734,7 +760,8 @@ def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
     need = {"Symbol", "Date", "side", "px", "shares"}
     if not need.issubset(trades.columns):
         return pd.DataFrame(columns=cols)
-    t = trades.sort_values(["Symbol", "Date"]).copy()
+    t = dedupe_trade_legs(trades)
+    t = t.sort_values(["Symbol", "Date"]).copy()
     t["Date"] = pd.to_datetime(t["Date"])
     rows: list[dict] = []
     for sym, g in t.groupby("Symbol", observed=True):
@@ -742,7 +769,9 @@ def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
         for _, r in g.iterrows():
             side = str(r["side"]).upper()
             if side == "BUY":
-                open_buy = r
+                if open_buy is None:
+                    open_buy = r
+                continue
             elif side == "SELL" and open_buy is not None:
                 shares = float(open_buy["shares"])
                 entry_px = float(open_buy["px"])
@@ -758,7 +787,19 @@ def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
                     }
                 )
                 open_buy = None
-    return pd.DataFrame(rows, columns=cols)
+    out = pd.DataFrame(rows, columns=cols)
+    if out.empty:
+        return out
+    return out.drop_duplicates(
+        subset=[
+            "symbol",
+            "trade_entry_date",
+            "trade_exit_date",
+            "trade_entry_price",
+            "trade_exit_price",
+        ],
+        keep="first",
+    )
 
 
 def simulate_topk_calendar(
@@ -799,13 +840,22 @@ def simulate_topk_calendar(
 
     cash = float(st["initial_capital"])
     positions: dict = {}
+    last_exit_idx: dict[str, int] = {}
     equity_rows: list[dict] = []
     trade_rows: list[dict] = []
     n_trades = 0
+    cal_index = {pd.Timestamp(d): i for i, d in enumerate(calendar)}
+    reentry_cd = int(st.get("reentry_cooldown_sessions", st["max_hold"]))
 
     for i in range(len(dates) - 1):
         d, nxt = dates[i], dates[i + 1]
-        panel_nxt = panel_df.loc[panel_df["Date"] == nxt].set_index("Symbol")
+        nxt_idx = cal_index.get(pd.Timestamp(nxt), -1)
+        panel_nxt = (
+            panel_df.loc[panel_df["Date"] == nxt]
+            .sort_values("Symbol")
+            .drop_duplicates("Symbol", keep="last")
+            .set_index("Symbol")
+        )
         n_no_bar = 0
 
         for sym in list(positions):
@@ -833,10 +883,14 @@ def simulate_topk_calendar(
                             }
                         )
                         del positions[sym]
+                        if nxt_idx >= 0:
+                            last_exit_idx[sym] = nxt_idx
                         n_trades += 1
                 continue
 
-            row = panel_nxt.loc[sym]
+            row = _panel_bar(panel_nxt, sym)
+            if row is None:
+                continue
             opn, lo, cl = float(row["Open"]), float(row["Low"]), float(row["Close"])
             pos["missing_bars"] = 0
             if np.isfinite(cl) and cl > 0:
@@ -872,6 +926,8 @@ def simulate_topk_calendar(
                     }
                 )
                 del positions[sym]
+                if nxt_idx >= 0:
+                    last_exit_idx[sym] = nxt_idx
                 n_trades += 1
 
         day = (
@@ -885,9 +941,12 @@ def simulate_topk_calendar(
             sym = normalize_symbol(r["Symbol"])
             if sym in positions:
                 continue
-            if sym not in panel_nxt.index:
+            last_x = last_exit_idx.get(sym)
+            if last_x is not None and nxt_idx >= 0 and (nxt_idx - last_x) < reentry_cd:
                 continue
-            nxt_row = panel_nxt.loc[sym]
+            nxt_row = _panel_bar(panel_nxt, sym)
+            if nxt_row is None:
+                continue
             opn = float(nxt_row["Open"])
             prev_c = float(r["Close"])
             if not np.isfinite(opn) or opn <= 0:
@@ -934,7 +993,7 @@ def simulate_topk_calendar(
         )
 
     eq = pd.DataFrame(equity_rows)
-    trades = pd.DataFrame(trade_rows)
+    trades = dedupe_trade_legs(pd.DataFrame(trade_rows))
     if eq.empty:
         return eq, {}, trades
     stats_out = equity_curve_metrics(eq, float(st["initial_capital"]))

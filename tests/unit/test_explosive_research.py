@@ -16,6 +16,7 @@ from quant.research.explosive_research import (
     classify_calendar_gap,
     daily_precision_lift,
     dedupe_event_episodes,
+    dedupe_trade_legs,
     enrich_equity_drawdown,
     explosive_mfe_threshold,
     equity_curve_metrics,
@@ -480,6 +481,17 @@ class TestSimulateTopKEquity:
 
 
 class TestTradesToRoundTrips:
+    def test_ignores_stacked_buys_before_sell(self):
+        trades = pd.DataFrame(
+            [
+                {"Symbol": "AAA", "Date": "2025-01-07", "side": "BUY", "px": 100.0, "shares": 10.0},
+                {"Symbol": "AAA", "Date": "2025-01-07", "side": "BUY", "px": 100.0, "shares": 10.0},
+                {"Symbol": "AAA", "Date": "2025-01-10", "side": "SELL", "px": 110.0, "shares": 10.0},
+            ]
+        )
+        rt = trades_to_round_trips(trades)
+        assert len(rt) == 1
+
     def test_pairs_buy_then_sell(self):
         trades = pd.DataFrame(
             [
@@ -503,6 +515,17 @@ class TestTradesToRoundTrips:
         assert len(rt) == 1
         assert rt.iloc[0]["symbol"] == "AAA"
         assert rt.iloc[0]["profit_loss"] == pytest.approx(100.0)
+
+    def test_dedupe_trade_legs(self):
+        legs = pd.DataFrame(
+            [
+                {"Symbol": "aaa", "Date": "2025-01-07", "side": "buy", "px": 1.0, "shares": 1.0},
+                {"Symbol": "AAA", "Date": "2025-01-07", "side": "BUY", "px": 1.0, "shares": 1.0},
+            ]
+        )
+        out = dedupe_trade_legs(legs)
+        assert len(out) == 1
+        assert out.iloc[0]["Symbol"] == "AAA"
 
 
 class TestExchangeSessionRegistry:

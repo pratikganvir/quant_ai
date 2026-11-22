@@ -28,6 +28,14 @@ def export_all_trades_csv() -> None:
     if not parts:
         return
     out = pd.concat(parts, ignore_index=True)
+    key = [
+        "symbol",
+        "trade_entry_date",
+        "trade_exit_date",
+        "trade_entry_price",
+        "trade_exit_price",
+    ]
+    out = out.drop_duplicates(subset=key, keep="first")
     TRADES_ALL_CSV.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(TRADES_ALL_CSV, index=False)
     print("Wrote", TRADES_ALL_CSV, f"({len(out)} round trips)")

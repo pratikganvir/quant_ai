@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "5"  # bump when label/feature numerics change (invalidates caches)
-SIM_ENGINE_VERSION = "5"  # deduped panel bars, reentry cooldown, deduped trade log
+SIM_ENGINE_VERSION = "6"  # optional no symbol re-entry; deduped legs
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -839,7 +839,9 @@ def simulate_topk_calendar(
     )
 
     cash = float(st["initial_capital"])
+    allow_reentry = bool(st.get("allow_symbol_reentry", False))
     positions: dict = {}
+    symbols_traded: set[str] = set()
     last_exit_idx: dict[str, int] = {}
     equity_rows: list[dict] = []
     trade_rows: list[dict] = []
@@ -941,6 +943,8 @@ def simulate_topk_calendar(
             sym = normalize_symbol(r["Symbol"])
             if sym in positions:
                 continue
+            if not allow_reentry and sym in symbols_traded:
+                continue
             last_x = last_exit_idx.get(sym)
             if last_x is not None and nxt_idx >= 0 and (nxt_idx - last_x) < reentry_cd:
                 continue
@@ -965,6 +969,7 @@ def simulate_topk_calendar(
                 continue
             cash -= notional + cost
             mark = float(nxt_row["Close"]) if np.isfinite(nxt_row["Close"]) and float(nxt_row["Close"]) > 0 else px
+            symbols_traded.add(sym)
             positions[sym] = {
                 "entry_px": px,
                 "shares": shares,

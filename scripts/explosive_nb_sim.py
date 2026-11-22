@@ -15,30 +15,21 @@ def write_round_trip_csv(trade_log: pd.DataFrame, path: Path) -> None:
 
 
 def export_all_trades_csv() -> None:
-    parts = []
-    for k in CFG["strategy"]["top_k"]:
-        trade_path = OUT_DIR / "reports" / f"trades_top{k}.parquet"
-        if not trade_path.exists():
-            continue
-        rt = trades_to_round_trips(pd.read_parquet(trade_path))
-        if rt.empty:
-            continue
-        rt = rt.assign(top_k=k)
-        parts.append(rt)
-    if not parts:
+    """Write combined CSV from the largest top_k run (avoids duplicate symbols across k variants)."""
+    ks = list(CFG["strategy"]["top_k"])
+    if not ks:
         return
-    out = pd.concat(parts, ignore_index=True)
-    key = [
-        "symbol",
-        "trade_entry_date",
-        "trade_exit_date",
-        "trade_entry_price",
-        "trade_exit_price",
-    ]
-    out = out.drop_duplicates(subset=key, keep="first")
+    primary_k = max(ks)
+    trade_path = OUT_DIR / "reports" / f"trades_top{primary_k}.parquet"
+    if not trade_path.exists():
+        return
+    out = trades_to_round_trips(pd.read_parquet(trade_path))
+    if out.empty:
+        return
+    out = out.assign(top_k=primary_k)
     TRADES_ALL_CSV.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(TRADES_ALL_CSV, index=False)
-    print("Wrote", TRADES_ALL_CSV, f"({len(out)} round trips)")
+    print("Wrote", TRADES_ALL_CSV, f"({len(out)} round trips from top-{primary_k})")
 
 
 eq_paths = [OUT_DIR / "reports" / f"equity_top{k}.parquet" for k in CFG["strategy"]["top_k"]]

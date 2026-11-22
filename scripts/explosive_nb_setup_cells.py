@@ -52,6 +52,7 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
             "prob_threshold": 0.25,
             "max_hold": 20,
             "reentry_cooldown_sessions": 20,
+            "allow_symbol_reentry": False,
             "stop_loss": 0.10,
             "max_participation_pct": 0.05,
             "initial_capital": 1_000_000.0,

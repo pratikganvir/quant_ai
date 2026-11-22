@@ -162,6 +162,121 @@ def classify_stock_absence(
     return "C"
 
 
+def symbol_internal_session_gaps(
+    panel: pd.DataFrame,
+    ref_cal: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Missing reference sessions between two consecutive bars for each symbol."""
+    ref = pd.DatetimeIndex(pd.to_datetime(ref_cal))
+    panel = panel.copy()
+    panel["Date"] = pd.to_datetime(panel["Date"])
+    rows: list[dict] = []
+    for sym, g in panel.groupby("Symbol", observed=True):
+        dts = g["Date"].drop_duplicates().sort_values()
+        pos = ref.get_indexer(dts)
+        pos = pos[pos >= 0]
+        if len(pos) < 2:
+            continue
+        pos = np.sort(pos)
+        for i in range(len(pos) - 1):
+            missing = int(pos[i + 1] - pos[i] - 1)
+            if missing <= 0:
+                continue
+            gap_start = ref[pos[i]]
+            gap_end = ref[pos[i + 1]]
+            missing_dates = list(ref[pos[i] + 1 : pos[i + 1]])
+            rows.append(
+                {
+                    "Symbol": str(sym),
+                    "bar_before": gap_start,
+                    "bar_after": gap_end,
+                    "missing_sessions": missing,
+                    "first_missing_session": missing_dates[0],
+                    "last_missing_session": missing_dates[-1],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def symbol_continuity_table(
+    panel: pd.DataFrame,
+    ref_cal: pd.DatetimeIndex,
+    session_gaps: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Per-symbol coverage on the reference calendar over each symbol's first→last bar."""
+    ref = pd.DatetimeIndex(pd.to_datetime(ref_cal))
+    panel = panel.copy()
+    panel["Date"] = pd.to_datetime(panel["Date"])
+    if session_gaps is None:
+        session_gaps = symbol_internal_session_gaps(panel, ref)
+    gap_agg = pd.DataFrame()
+    if not session_gaps.empty:
+        gap_agg = session_gaps.groupby("Symbol", observed=True)["missing_sessions"].agg(
+            max_gap="max",
+            total_missing="sum",
+            n_gaps="size",
+        )
+        gap_agg.index = gap_agg.index.astype(str)
+    rows: list[dict] = []
+    for sym, g in panel.groupby("Symbol", observed=True):
+        dts = g["Date"].drop_duplicates().sort_values()
+        d0, d1 = pd.Timestamp(dts.min()), pd.Timestamp(dts.max())
+        i0, i1 = ref.get_indexer([d0, d1])
+        expected = int(i1 - i0 + 1) if i0 >= 0 and i1 >= 0 else 0
+        n_bars = int(len(dts))
+        coverage = (n_bars / expected) if expected > 0 else np.nan
+        sym_s = str(sym)
+        row = {
+            "Symbol": sym_s,
+            "n_bars": n_bars,
+            "first_date": d0,
+            "last_date": d1,
+            "expected_sessions": expected,
+            "coverage_ratio": coverage,
+            "max_gap": 0,
+            "total_missing_sessions": 0,
+            "n_gap_episodes": 0,
+        }
+        if not gap_agg.empty and sym_s in gap_agg.index:
+            row["max_gap"] = int(gap_agg.loc[sym_s, "max_gap"])
+            row["total_missing_sessions"] = int(gap_agg.loc[sym_s, "total_missing"])
+            row["n_gap_episodes"] = int(gap_agg.loc[sym_s, "n_gaps"])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def apply_symbol_continuity_filter(
+    panel: pd.DataFrame,
+    nifty_df: pd.DataFrame | None,
+    cfg: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Drop symbols that miss too many reference sessions while ostensibly listed.
+
+    Perfect session coverage (1.0) is unrealistic on NSE vendor data; defaults aim for
+    names tradable on (almost) every exchange session in their active window.
+    """
+    sc = cfg.get("symbol_continuity") or {}
+    if not sc.get("enabled", True):
+        return panel, pd.DataFrame()
+    min_cov = float(sc.get("min_coverage_ratio", 0.95))
+    max_gap = int(sc.get("max_internal_gap_sessions", 20))
+    registry = build_exchange_session_registry(panel, nifty_df)
+    ref = refined_trading_calendar(registry)
+    if len(ref) == 0:
+        ref = pd.DatetimeIndex(sorted(pd.to_datetime(panel["Date"].unique())))
+    gaps = symbol_internal_session_gaps(panel, ref)
+    cov = symbol_continuity_table(panel, ref, gaps)
+    if cov.empty:
+        return panel, cov
+    bad = (cov["coverage_ratio"] < min_cov) | (cov["max_gap"] > max_gap)
+    bad_syms = set(cov.loc[bad, "Symbol"].astype(str))
+    kept = panel.loc[~panel["Symbol"].astype(str).isin(bad_syms)].copy()
+    excluded = cov.loc[cov["Symbol"].astype(str).isin(bad_syms)].copy()
+    excluded["excluded"] = True
+    return kept, excluded
+
+
 def calendar_shift(cal: pd.DatetimeIndex, dates: pd.Series, n: int) -> pd.Series:
     """Shift dates by n trading sessions on the exchange calendar (negative = look back)."""
     pos = cal.get_indexer(pd.to_datetime(dates))

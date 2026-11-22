@@ -88,6 +88,7 @@ _features_fp = fingerprint_dict(
         "min_price": CFG["min_price"],
         "min_turnover": CFG["min_median_turnover_20d"],
         "nifty": file_fingerprint(NIFTY50_PATH),
+        "symbol_continuity": CFG.get("symbol_continuity"),
     }
 )
 

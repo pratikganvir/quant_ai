@@ -9,6 +9,7 @@ import pytest
 from pathlib import Path
 
 from quant.research.explosive_research import (
+    apply_symbol_continuity_filter,
     build_exchange_session_registry,
     ca_invalidates_forward_window,
     calendar_shift,
@@ -40,6 +41,28 @@ from tests.unit.explosive_fixtures import (
     triple_barrier_panel,
     two_symbol_panel_with_gap,
 )
+
+
+class TestSymbolContinuity:
+    def test_drops_symbol_with_long_internal_gap(self):
+        cal = pd.bdate_range("2025-01-06", periods=40, freq="B")
+        full = daily_symbol_series("GOOD", cal)
+        bad = pd.concat(
+            [daily_symbol_series("BAD", cal[:1]), daily_symbol_series("BAD", cal[-1:])],
+            ignore_index=True,
+        )
+        panel = pd.concat([full, bad], ignore_index=True)
+        cfg = {
+            "symbol_continuity": {
+                "enabled": True,
+                "min_coverage_ratio": 0.95,
+                "max_internal_gap_sessions": 5,
+            }
+        }
+        kept, excl = apply_symbol_continuity_filter(panel, None, cfg)
+        assert "GOOD" in set(kept["Symbol"].astype(str))
+        assert "BAD" not in set(kept["Symbol"].astype(str))
+        assert not excl.empty
 
 
 class TestFeatureArtifacts:

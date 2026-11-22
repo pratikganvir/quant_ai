@@ -58,11 +58,30 @@ with tqdm(total=2, desc="Phase 2 — panel load") as pbar:
         bad = panel["Series"].notna() & ~panel["Series"].str.upper().eq("EQ")
         panel = panel.loc[~bad]
 
+    from quant.research.explosive_research import apply_symbol_continuity_filter
+
     nifty = None
     if NIFTY50_PATH.exists():
         nifty = normalize_ohlc(pd.read_parquet(NIFTY50_PATH), "NIFTY50")
         nifty = nifty.sort_values("Date")
         nifty["nifty_ret_1"] = nifty["Close"].pct_change()
+
+    pre_rows, pre_syms = len(panel), panel["Symbol"].nunique()
+    panel, continuity_excluded = apply_symbol_continuity_filter(panel, nifty, CFG)
+    if not continuity_excluded.empty:
+        rep = OUT_DIR / "reports" / "symbol_continuity_excluded.parquet"
+        rep.parent.mkdir(parents=True, exist_ok=True)
+        continuity_excluded.to_parquet(rep, index=False)
+        print(
+            "Symbol continuity filter:",
+            len(continuity_excluded),
+            "symbols excluded,",
+            pre_rows - len(panel),
+            "rows removed (",
+            f"{100 * (pre_rows - len(panel)) / max(pre_rows, 1):.1f}% ),",
+            "cfg:",
+            CFG.get("symbol_continuity"),
+        )
 
     print(panel.shape, panel["Date"].min(), "→", panel["Date"].max(), "symbols:", panel["Symbol"].nunique())
     pbar.update(1)

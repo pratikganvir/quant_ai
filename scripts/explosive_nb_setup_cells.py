@@ -58,6 +58,12 @@ with tqdm(total=1, desc="Phase 0 — config") as pbar:
             "initial_capital": 1_000_000.0,
             "max_missing_sessions": 10,
         },
+        # Drop symbols with patchy vendor history (see nse_data_inspection coverage).
+        "symbol_continuity": {
+            "enabled": True,
+            "min_coverage_ratio": 0.95,
+            "max_internal_gap_sessions": 20,
+        },
         # Resume: skip phases when artifacts + meta fingerprint match. Override:
         #   CFG["rerun_all"] = True  OR  CFG["force_rerun"] = ["panel", "events", ...]
         "rerun_all": False,

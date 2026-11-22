@@ -22,7 +22,11 @@ def add_labels(df, cfg):
 
 TRADING_CAL = trading_calendar_from_panel(panel)
 _events_fp = fingerprint_dict(
-    {"panel": read_meta_fingerprint(PANEL_META_PATH), "labels": label_cfg_fingerprint(CFG)}
+    {
+        "panel": read_meta_fingerprint(PANEL_META_PATH),
+        "labels": label_cfg_fingerprint(CFG),
+        "symbol_continuity": CFG.get("symbol_continuity"),
+    }
 )
 
 if phase_cache_hit(CFG, "events", [EVENTS_PATH], EVENTS_META_PATH, _events_fp):

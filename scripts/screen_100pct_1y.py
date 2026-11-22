@@ -132,7 +132,7 @@ def merge_liquidity_at_start(
     return out[lead + vol_cols + turn_cols]
 
 
-def _calendar_1y_one_symbol(g: pd.DataFrame) -> pd.DataFrame:
+def _calendar_1y_one_symbol(g: pd.DataFrame, symbol: str) -> pd.DataFrame:
     g = g.sort_values("Date").copy()
     ref = g[["Date", "Close"]].rename(columns={"Date": "start_date", "Close": "start_price"})
     g["lookup_date"] = g["Date"] - pd.DateOffset(years=1)
@@ -143,6 +143,7 @@ def _calendar_1y_one_symbol(g: pd.DataFrame) -> pd.DataFrame:
         right_on="start_date",
         direction="backward",
     )
+    merged["Symbol"] = symbol
     merged["end_date"] = merged["Date"]
     merged["end_price"] = merged["Close"]
     merged["ret_1y"] = merged["end_price"] / merged["start_price"] - 1.0
@@ -151,7 +152,14 @@ def _calendar_1y_one_symbol(g: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_calendar_1y_returns(bars: pd.DataFrame) -> pd.DataFrame:
-    return bars.groupby("Symbol", group_keys=False, observed=True).apply(_calendar_1y_one_symbol)
+    # groupby subsets omit the grouping column (pandas 2.x); keep Symbol explicitly.
+    parts = [
+        _calendar_1y_one_symbol(g, str(sym))
+        for sym, g in bars.groupby("Symbol", observed=True)
+    ]
+    if not parts:
+        return bars.iloc[0:0].copy()
+    return pd.concat(parts, ignore_index=True)
 
 
 def _valid_window_mask(

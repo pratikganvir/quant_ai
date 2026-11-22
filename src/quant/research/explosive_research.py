@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 LABEL_ENGINE_VERSION = "5"  # bump when label/feature numerics change (invalidates caches)
-SIM_ENGINE_VERSION = "3"  # optional missing-bar gating on validated exchange sessions
+SIM_ENGINE_VERSION = "4"  # symbol-normalized positions; no duplicate entry while held
 
 LABEL_CFG_KEYS = (
     "horizons",
@@ -715,6 +715,10 @@ def report_equity_diagnostics(
     print(worst.to_string(index=False))
 
 
+def normalize_symbol(sym) -> str:
+    return str(sym).strip().upper()
+
+
 def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
     """Pair BUY/SELL legs (FIFO per symbol) into closed round trips for export."""
     cols = [
@@ -770,9 +774,18 @@ def simulate_topk_calendar(
     """Top-K long-only simulator on a full trading calendar with carry-forward MTM."""
     st = cfg["strategy"]
     max_missing = int(st.get("max_missing_sessions", 10))
+    prob_floor = float(st.get("prob_threshold", 0))
+    panel_df = panel_df.copy()
+    panel_df["Symbol"] = panel_df["Symbol"].map(normalize_symbol)
     f = features_df.copy()
     f["score"] = np.asarray(scores)
     f["Date"] = pd.to_datetime(f["Date"])
+    f["Symbol"] = f["Symbol"].map(normalize_symbol)
+    f = f.sort_values(["Date", "score"], ascending=[True, False]).drop_duplicates(
+        ["Date", "Symbol"], keep="first"
+    )
+    if prob_floor > 0:
+        f = f.loc[f["score"] >= prob_floor]
     dmin, dmax = f["Date"].min(), f["Date"].max()
     dates = [d for d in calendar if dmin <= d <= dmax]
     if len(dates) < 2:
@@ -861,12 +874,15 @@ def simulate_topk_calendar(
                 del positions[sym]
                 n_trades += 1
 
-        day = f.loc[f["Date"] == d].nlargest(top_k, "score")
-        slots = top_k - len(positions)
+        day = (
+            f.loc[f["Date"] == d]
+            .sort_values("score", ascending=False)
+            .drop_duplicates("Symbol", keep="first")
+        )
         for _, r in day.iterrows():
-            if slots <= 0:
+            if len(positions) >= top_k:
                 break
-            sym = r["Symbol"]
+            sym = normalize_symbol(r["Symbol"])
             if sym in positions:
                 continue
             if sym not in panel_nxt.index:
@@ -880,6 +896,7 @@ def simulate_topk_calendar(
                 continue
             vol = float(nxt_row["Volume"]) if np.isfinite(nxt_row["Volume"]) else 0
             max_notional = vol * opn * st["max_participation_pct"]
+            slots = top_k - len(positions)
             alloc = cash / max(slots, 1)
             notional = min(alloc, max_notional) if max_notional > 0 else alloc
             px = execution_price(opn, "BUY", cfg)
@@ -909,7 +926,6 @@ def simulate_topk_calendar(
                     "notional": notional,
                 }
             )
-            slots -= 1
             n_trades += 1
 
         mtm = _portfolio_mtm(cash, positions)

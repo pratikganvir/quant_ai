@@ -355,6 +355,40 @@ class TestSimulateTopKEquity:
         assert stats["max_drawdown"] > -0.05
         assert stats["total_return"] > -0.05
 
+    def test_no_duplicate_buy_while_position_open(self):
+        cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=8, freq="B"))
+        panel = pd.DataFrame(
+            [
+                {
+                    "Date": d,
+                    "Symbol": "A",
+                    "Open": 100.0,
+                    "High": 100.0,
+                    "Low": 100.0,
+                    "Close": 100.0,
+                    "Volume": 1_000_000.0,
+                }
+                for d in cal
+            ]
+        )
+        features = pd.DataFrame(
+            {
+                "Date": list(cal[:-1]),
+                "Symbol": ["A"] * (len(cal) - 1),
+                "Close": [100.0] * (len(cal) - 1),
+            }
+        )
+        _, _, trades = simulate_topk_calendar(
+            features,
+            panel,
+            np.ones(len(cal) - 1),
+            top_k=1,
+            cfg=self._minimal_cfg(),
+            calendar=cal,
+        )
+        buys = trades.loc[trades["side"] == "BUY", "Symbol"].astype(str)
+        assert (buys == "A").sum() == 1
+
     def test_return_uses_initial_capital_not_first_equity(self):
         cal = pd.DatetimeIndex(pd.bdate_range("2025-01-06", periods=4, freq="B"))
         panel = pd.DataFrame(

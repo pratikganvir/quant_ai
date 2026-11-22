@@ -54,20 +54,21 @@ def compute_panel_features(panel_df, nifty_df=None):
     if nifty_df is not None:
         nd = nifty_df[["Date", "Close"]].copy()
         nd["Date"] = pd.to_datetime(nd["Date"], errors="coerce")
-        nd = nd.sort_values("Date")
+        nd = nd.sort_values("Date").drop_duplicates("Date", keep="last")
         nd = nd.assign(
             mkt_nifty_ret_5=nd["Close"].pct_change(5),
             mkt_nifty_ret_20=nd["Close"].pct_change(20),
         )
-        x = x.merge(nd[["Date", "mkt_nifty_ret_5", "mkt_nifty_ret_20"]], on="Date", how="left")
-        x["rs_20"] = x["px_ret_20"] - x["mkt_nifty_ret_20"]
-        sma20 = g["Close"].transform(lambda s: s.rolling(20, min_periods=10).mean())
+        gs = x.groupby("Symbol", observed=True)
+        sma20 = gs["Close"].transform(lambda s: s.rolling(20, min_periods=10).mean())
         breadth = (
             x.assign(_above=(x["Close"] > sma20).astype(int))
             .groupby("Date", observed=True)["_above"]
             .mean()
             .rename("mkt_breadth_20sma")
         )
+        x = x.merge(nd[["Date", "mkt_nifty_ret_5", "mkt_nifty_ret_20"]], on="Date", how="left")
+        x["rs_20"] = x["px_ret_20"] - x["mkt_nifty_ret_20"]
         x = x.merge(breadth, on="Date", how="left")
     return x
 

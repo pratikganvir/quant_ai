@@ -2,7 +2,35 @@ from quant.research.explosive_research import (
     SIM_ENGINE_VERSION,
     report_equity_diagnostics,
     simulate_topk_calendar,
+    trades_to_round_trips,
 )
+
+TRADES_ALL_CSV = OUT_DIR / "reports" / "trades_all.csv"
+
+
+def write_round_trip_csv(trade_log: pd.DataFrame, path: Path) -> None:
+    if trade_log.empty:
+        return
+    trades_to_round_trips(trade_log).to_csv(path, index=False)
+
+
+def export_all_trades_csv() -> None:
+    parts = []
+    for k in CFG["strategy"]["top_k"]:
+        trade_path = OUT_DIR / "reports" / f"trades_top{k}.parquet"
+        if not trade_path.exists():
+            continue
+        rt = trades_to_round_trips(pd.read_parquet(trade_path))
+        if rt.empty:
+            continue
+        rt = rt.assign(top_k=k)
+        parts.append(rt)
+    if not parts:
+        return
+    out = pd.concat(parts, ignore_index=True)
+    TRADES_ALL_CSV.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(TRADES_ALL_CSV, index=False)
+    print("Wrote", TRADES_ALL_CSV, f"({len(out)} round trips)")
 
 
 eq_paths = [OUT_DIR / "reports" / f"equity_top{k}.parquet" for k in CFG["strategy"]["top_k"]]
@@ -36,7 +64,10 @@ else:
             Path(OUT_DIR / "reports" / f"equity_top{k}_stats.json").write_text(json.dumps(stout, indent=2))
             if not trades.empty:
                 trades.to_parquet(OUT_DIR / "reports" / f"trades_top{k}.parquet", index=False)
+                write_round_trip_csv(trades, OUT_DIR / "reports" / f"trades_top{k}.csv")
     write_phase_meta(SIM_META_PATH, "sim", _sim_fp)
+
+export_all_trades_csv()
 
 print("\n--- Equity diagnostics (cached or fresh) ---")
 for k in CFG["strategy"]["top_k"]:

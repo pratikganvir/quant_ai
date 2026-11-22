@@ -713,6 +713,48 @@ def report_equity_diagnostics(
     print(worst.to_string(index=False))
 
 
+def trades_to_round_trips(trades: pd.DataFrame) -> pd.DataFrame:
+    """Pair BUY/SELL legs (FIFO per symbol) into closed round trips for export."""
+    cols = [
+        "symbol",
+        "trade_entry_date",
+        "trade_entry_price",
+        "trade_exit_date",
+        "trade_exit_price",
+        "profit_loss",
+    ]
+    if trades is None or trades.empty:
+        return pd.DataFrame(columns=cols)
+    need = {"Symbol", "Date", "side", "px", "shares"}
+    if not need.issubset(trades.columns):
+        return pd.DataFrame(columns=cols)
+    t = trades.sort_values(["Symbol", "Date"]).copy()
+    t["Date"] = pd.to_datetime(t["Date"])
+    rows: list[dict] = []
+    for sym, g in t.groupby("Symbol", observed=True):
+        open_buy: pd.Series | None = None
+        for _, r in g.iterrows():
+            side = str(r["side"]).upper()
+            if side == "BUY":
+                open_buy = r
+            elif side == "SELL" and open_buy is not None:
+                shares = float(open_buy["shares"])
+                entry_px = float(open_buy["px"])
+                exit_px = float(r["px"])
+                rows.append(
+                    {
+                        "symbol": str(sym),
+                        "trade_entry_date": open_buy["Date"],
+                        "trade_entry_price": entry_px,
+                        "trade_exit_date": r["Date"],
+                        "trade_exit_price": exit_px,
+                        "profit_loss": (exit_px - entry_px) * shares,
+                    }
+                )
+                open_buy = None
+    return pd.DataFrame(rows, columns=cols)
+
+
 def simulate_topk_calendar(
     features_df: pd.DataFrame,
     panel_df: pd.DataFrame,

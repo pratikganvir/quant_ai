@@ -30,6 +30,7 @@ from quant.research.explosive_research import (
     refined_trading_calendar,
     simulate_topk_calendar,
     summarize_daily_metrics,
+    trades_to_round_trips,
     trading_calendar_from_panel,
     write_phase_meta,
 )
@@ -436,6 +437,32 @@ class TestSimulateTopKEquity:
         assert (trades_bad["reason"] == "missing_bar").any()
         if not trades_ok.empty and "reason" in trades_ok.columns:
             assert not (trades_ok["reason"] == "missing_bar").any()
+
+
+class TestTradesToRoundTrips:
+    def test_pairs_buy_then_sell(self):
+        trades = pd.DataFrame(
+            [
+                {
+                    "Symbol": "AAA",
+                    "Date": "2025-01-07",
+                    "side": "BUY",
+                    "px": 100.0,
+                    "shares": 10.0,
+                },
+                {
+                    "Symbol": "AAA",
+                    "Date": "2025-01-10",
+                    "side": "SELL",
+                    "px": 110.0,
+                    "shares": 10.0,
+                },
+            ]
+        )
+        rt = trades_to_round_trips(trades)
+        assert len(rt) == 1
+        assert rt.iloc[0]["symbol"] == "AAA"
+        assert rt.iloc[0]["profit_loss"] == pytest.approx(100.0)
 
 
 class TestExchangeSessionRegistry:

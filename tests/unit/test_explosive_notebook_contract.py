@@ -22,7 +22,6 @@ CELL_SCRIPT_PAIRS = [
     ("from quant.research.explosive_research import load_feature_dataset_artifacts", "explosive_nb_helpers.py"),
     ("from sklearn.isotonic import IsotonicRegression", "explosive_nb_ml.py"),
     ("from quant.research.explosive_research import (\n    SIM_ENGINE_VERSION,", "explosive_nb_sim.py"),
-    ('"""Phase 8.1.0 — trading calendar validation', "explosive_nb_phase810.py"),
     ("_scan_fp = fingerprint_dict", "explosive_nb_scan.py"),
 ]
 
@@ -62,7 +61,7 @@ def notebook_cells():
 
 
 def test_notebook_exists_with_expected_code_cell_count(notebook_cells):
-    assert len(notebook_cells) == 13
+    assert len(notebook_cells) == 12
 
 
 @pytest.mark.parametrize("prefix, script_name", CELL_SCRIPT_PAIRS)

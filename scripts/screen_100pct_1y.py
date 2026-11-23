@@ -24,9 +24,10 @@ MIN_PRICE = 5.0
 AS_OF: pd.Timestamp | None = None
 EQ_ONLY = True
 
-# Calendar window quality: reject gappy histories (e.g. 252 rows over 5+ years).
-MIN_WINDOW_DAYS = 300
+# Calendar window quality: ~1y span and start price near the 1y anchor (not a stale bar).
+MIN_WINDOW_DAYS = 330
 MAX_WINDOW_DAYS = 400
+MAX_START_LAG_DAYS = 21  # start bar at most N calendar days before exact end-1y
 
 LIQ_WINDOWS = (5, 10, 15, 20, 25, 30, 45, 60, 75, 90)
 
@@ -43,7 +44,7 @@ def load_panel() -> pd.DataFrame:
         have = set(pq.ParquetFile(panel_path).schema.names)
         cols = [c for c in ("Date", "Symbol", "Close", "Volume", "Turnover", "Series") if c in have]
         df = pd.read_parquet(panel_path, columns=cols)
-        df["Date"] = pd.to_datetime(df["Date"])
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
         return df
 
     import duckdb
@@ -69,12 +70,13 @@ def load_panel() -> pd.DataFrame:
     WHERE close IS NOT NULL AND close > 0
     """
     df = duckdb.connect().execute(sql).df()
-    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
     return df
 
 
 def _prepare_bars(panel: pd.DataFrame, *, eq_only: bool) -> pd.DataFrame:
     x = panel.dropna(subset=["Date", "Symbol", "Close"]).copy()
+    x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize()
     x["Symbol"] = x["Symbol"].astype(str).str.upper().str.strip()
     x["Close"] = pd.to_numeric(x["Close"], errors="coerce")
     x = x.dropna(subset=["Close"])
@@ -148,6 +150,7 @@ def _calendar_1y_one_symbol(g: pd.DataFrame, symbol: str) -> pd.DataFrame:
     merged["end_price"] = merged["Close"]
     merged["ret_1y"] = merged["end_price"] / merged["start_price"] - 1.0
     merged["window_days"] = (merged["end_date"] - merged["start_date"]).dt.days
+    merged["start_lag_days"] = (merged["lookup_date"] - merged["start_date"]).dt.days
     return merged
 
 
@@ -167,14 +170,64 @@ def _valid_window_mask(
     *,
     min_window_days: int,
     max_window_days: int,
+    max_start_lag_days: int = MAX_START_LAG_DAYS,
 ) -> pd.Series:
+    lag = frame.get("start_lag_days")
+    lag_ok = lag.isna() if lag is None else (lag.notna() & (lag >= 0) & (lag <= max_start_lag_days))
     return (
         frame["start_price"].notna()
         & frame["start_date"].notna()
         & frame["window_days"].notna()
         & (frame["window_days"] >= min_window_days)
         & (frame["window_days"] <= max_window_days)
+        & lag_ok
     )
+
+
+def _resolve_as_of(frame: pd.DataFrame, as_of: pd.Timestamp | None) -> pd.Timestamp:
+    if as_of is not None:
+        target = pd.Timestamp(as_of).normalize()
+        if (frame["Date"] == target).any():
+            return target
+        raise ValueError(
+            f"AS_OF={target.date()} not in panel; "
+            f"latest={frame['Date'].max().date()} — set screen.AS_OF=None or a valid session."
+        )
+    return frame["Date"].max()
+
+
+def diagnose_screen_at(
+    panel: pd.DataFrame,
+    *,
+    as_of: pd.Timestamp | None = None,
+    min_return: float = MIN_RETURN,
+    eq_only: bool = EQ_ONLY,
+    min_window_days: int = MIN_WINDOW_DAYS,
+    max_window_days: int = MAX_WINDOW_DAYS,
+) -> pd.DataFrame:
+    """Funnel counts for why symbols drop off at the as-of date."""
+    x = attach_calendar_1y_returns(_prepare_bars(panel, eq_only=eq_only))
+    as_of_ts = _resolve_as_of(x, as_of)
+    snap = x.loc[x["Date"] == as_of_ts]
+    ok_win = _valid_window_mask(
+        snap, min_window_days=min_window_days, max_window_days=max_window_days
+    )
+    ret_ok = snap["ret_1y"].gt(min_return)
+    rows = [
+        ("symbols_on_as_of", snap["Symbol"].nunique()),
+        (f"ret_1y > {min_return}", int(ret_ok.sum())),
+        (
+            f"window_days in [{min_window_days},{max_window_days}]",
+            int((snap["window_days"].between(min_window_days, max_window_days)).sum()),
+        ),
+        (
+            f"start_lag_days <= {MAX_START_LAG_DAYS}",
+            int((snap["start_lag_days"].between(0, MAX_START_LAG_DAYS)).sum()),
+        ),
+        ("valid_window_all_rules", int(ok_win.sum())),
+        ("winners (valid & ret)", int((ok_win & ret_ok).sum())),
+    ]
+    return pd.DataFrame(rows, columns=["check", "count"])
 
 
 def stocks_over_100pct_1y(
@@ -191,7 +244,7 @@ def stocks_over_100pct_1y(
     bars_liq = attach_liquidity_features(x)
     x = attach_calendar_1y_returns(x)
 
-    as_of_ts = pd.Timestamp(as_of) if as_of is not None else x["Date"].max()
+    as_of_ts = _resolve_as_of(x, as_of)
     snap = x.loc[x["Date"] == as_of_ts].copy()
 
     mask = _valid_window_mask(
@@ -200,7 +253,19 @@ def stocks_over_100pct_1y(
     if min_price is not None:
         mask &= snap["end_price"] >= min_price
 
-    out = snap.loc[mask, ["Symbol", "start_date", "start_price", "end_date", "end_price", "ret_1y", "window_days"]].copy()
+    out = snap.loc[
+        mask,
+        [
+            "Symbol",
+            "start_date",
+            "start_price",
+            "end_date",
+            "end_price",
+            "ret_1y",
+            "window_days",
+            "start_lag_days",
+        ],
+    ].copy()
     out["ret_1y_pct"] = (out["ret_1y"] * 100).round(2)
     out = merge_liquidity_at_start(out, bars_liq)
     return out.sort_values("ret_1y", ascending=False).reset_index(drop=True)
@@ -253,8 +318,15 @@ def main() -> None:
     print("Date range:", panel["Date"].min(), "→", panel["Date"].max())
 
     winners = stocks_over_100pct_1y(panel, as_of=AS_OF)
-    as_of_str = winners["end_date"].iloc[0] if len(winners) else panel["Date"].max()
+    as_of_str = (
+        winners["end_date"].iloc[0]
+        if len(winners)
+        else _resolve_as_of(attach_calendar_1y_returns(_prepare_bars(panel)), AS_OF)
+    )
     print(f"\nAs of {as_of_str}: {len(winners)} symbols with >100% in 1 calendar year")
+    if len(winners) == 0:
+        print("\nScreen funnel (no winners):")
+        print(diagnose_screen_at(panel, as_of=AS_OF).to_string(index=False))
     pd.set_option("display.max_rows", 200)
     pd.set_option("display.width", 240)
     if len(winners):

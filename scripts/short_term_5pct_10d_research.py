@@ -198,6 +198,73 @@ def univariate_feature_rank(
     return out.sort_values("abs_cohen_d", ascending=False).reset_index(drop=True)
 
 
+def select_rf_features(
+    ds: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    min_coverage: float = 0.50,
+) -> list[str]:
+    """Drop features that are mostly missing (e.g. delivery % not in panel)."""
+    cols = [c for c in feature_cols if c in ds.columns]
+    if not cols:
+        return []
+    cov = ds[cols].apply(pd.to_numeric, errors="coerce").notna().mean()
+    return [c for c in cols if float(cov.get(c, 0.0)) >= min_coverage]
+
+
+def prepare_rf_sample(
+    ds: pd.DataFrame,
+    *,
+    label_col: str,
+    feature_cols: list[str] | None = None,
+    max_rows: int = 400_000,
+    random_seed: int = 42,
+    min_coverage: float = 0.50,
+) -> tuple[pd.DataFrame, pd.Series, dict[str, int | float]]:
+    """Median-imputed feature matrix + stratified subsample with both classes."""
+    feature_cols = feature_cols or FEATURE_COLS
+    feat_cols = select_rf_features(ds, feature_cols, min_coverage=min_coverage)
+    if not feat_cols:
+        raise ValueError("No features pass min_coverage — check panel columns.")
+
+    y = ds[label_col].astype(int)
+    diag: dict[str, int | float] = {
+        "rows_total": len(ds),
+        "hits_total": int((y == 1).sum()),
+        "miss_total": int((y == 0).sum()),
+        "n_features": len(feat_cols),
+    }
+    if diag["hits_total"] == 0:
+        raise ValueError("No positive labels in dataset. Lower MIN_RETURN_PCT or widen DATE_START.")
+    if diag["miss_total"] == 0:
+        raise ValueError("No negative labels in dataset.")
+
+    X = ds[feat_cols].apply(pd.to_numeric, errors="coerce")
+    X = X.fillna(X.median(numeric_only=True))
+    frame = X.assign(_y=y)
+
+    if len(frame) > max_rows:
+        from sklearn.model_selection import train_test_split
+
+        _, frame = train_test_split(
+            frame,
+            train_size=max_rows,
+            stratify=frame["_y"],
+            random_state=random_seed,
+        )
+
+    y_out = frame["_y"].astype(int)
+    X_out = frame.drop(columns=["_y"])
+    diag["rows_train"] = len(frame)
+    diag["hits_train"] = int((y_out == 1).sum())
+    diag["miss_train"] = int((y_out == 0).sum())
+    if y_out.nunique() < 2:
+        raise ValueError(
+            "RF sample has a single class after filtering — widen DATE_START or lower MIN_RETURN_PCT."
+        )
+    return X_out, y_out, diag
+
+
 def export_results(
     dataset: pd.DataFrame,
     rank: pd.DataFrame,

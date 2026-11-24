@@ -1,8 +1,9 @@
+import numpy as np
 import pandas as pd
 
 from quant.research.explosive_research import trading_calendar_from_panel
 
-from scripts.short_term_5pct_10d_research import attach_forward_labels
+from scripts.short_term_5pct_10d_research import attach_forward_labels, prepare_rf_sample
 
 
 def test_forward_label_10_sessions():
@@ -23,3 +24,18 @@ def test_forward_label_10_sessions():
     assert row["horizon_ok_10"]
     assert row["fwd_ret_10"] >= 0.05
     assert row["y_hit_10d"] == 1
+
+
+def test_prepare_rf_sample_stratified():
+    n = 200
+    df = pd.DataFrame(
+        {
+            "ret_1": np.random.randn(n),
+            "vol_rvol_20": np.random.uniform(0.5, 2.0, n),
+            "y_hit_10d": [1] * 20 + [0] * 180,
+        }
+    )
+    X, y, diag = prepare_rf_sample(df, label_col="y_hit_10d", feature_cols=["ret_1", "vol_rvol_20"], max_rows=100)
+    assert y.nunique() == 2
+    assert len(X) == 100
+    assert diag["hits_train"] >= 1

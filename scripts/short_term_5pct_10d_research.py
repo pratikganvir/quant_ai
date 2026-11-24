@@ -95,7 +95,7 @@ def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
     x["sma20"] = sma20
     x["dist_sma20"] = x["Close"] / sma20 - 1.0
     x["dist_sma50"] = x["Close"] / sma50 - 1.0
-    x["sma20_slope_5"] = x["sma20"] / g["sma20"].shift(5) - 1.0
+    x["sma20_slope_5"] = x["sma20"] / x.groupby("Symbol", observed=True)["sma20"].shift(5) - 1.0
     x = x.drop(columns=["sma20"])
 
     hi20 = g["High"].transform(lambda s: s.rolling(20, min_periods=10).max())

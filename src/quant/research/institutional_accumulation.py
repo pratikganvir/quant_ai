@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-INST_ACC_ENGINE_VERSION = "1"
+INST_ACC_ENGINE_VERSION = "3"  # v3: normalize OHLCV frame at ingest (duplicate panel columns)
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "flow_length": 6,
@@ -90,49 +90,84 @@ def _sma(s: pd.Series, length: int) -> pd.Series:
     return s.rolling(length, min_periods=length).mean()
 
 
+def _series_1d(df: pd.DataFrame, col: str) -> pd.Series:
+    """Single float Series for OHLCV col (handles duplicate column names from wide panels)."""
+    if col not in df.columns:
+        return pd.Series(dtype=float)
+    loc = df.columns.get_loc(col)
+    if isinstance(loc, slice):
+        raw = df.iloc[:, loc.start]
+    elif isinstance(loc, np.ndarray):
+        raw = df.iloc[:, int(loc[0])]
+    else:
+        raw = df.iloc[:, loc]
+    return pd.to_numeric(raw, errors="coerce")
+
+
+def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Exactly one column per OHLCV field (panels may repeat Volume/Close)."""
+    if df.empty:
+        return df
+    return pd.DataFrame(
+        {
+            "Date": pd.to_datetime(df["Date"], errors="coerce"),
+            "Open": _series_1d(df, "Open"),
+            "High": _series_1d(df, "High"),
+            "Low": _series_1d(df, "Low"),
+            "Close": _series_1d(df, "Close"),
+            "Volume": _series_1d(df, "Volume"),
+        }
+    ).dropna(subset=["Date"]).reset_index(drop=True)
+
+
 def compute_accumulation_frame(monthly: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
     """Monthly OHLCV for one symbol → indicators, scores, buy/sell flags (no lookahead in rolls)."""
     p = {**DEFAULT_PARAMS, **(params or {})}
-    df = monthly.sort_values("Date").copy()
+    df = _normalize_ohlcv_frame(monthly)
     if df.empty:
         return df
 
-    h, lo, cl, op, vol = df["High"], df["Low"], df["Close"], df["Open"], df["Volume"]
+    h = _series_1d(df, "High")
+    lo = _series_1d(df, "Low")
+    cl = _series_1d(df, "Close")
+    op = _series_1d(df, "Open")
+    vol = _series_1d(df, "Volume")
     rng = h - lo
-    clv = np.where(rng > 0, ((cl - lo) - (h - cl)) / rng, 0.0)
+    clv = ((cl - lo) - (h - cl)) / rng
+    clv = clv.where(rng > 0, 0.0)
     df["clv"] = clv
     mfv = clv * vol
     df["money_flow_volume"] = mfv
 
     avg_vol = _sma(vol, int(p["volume_length"]))
-    rel_vol = np.where(avg_vol > 0, vol / avg_vol, 0.0)
+    rel_vol = (vol / avg_vol).where(avg_vol > 0, 0.0)
     df["relative_volume"] = rel_vol
     df["signal_volume"] = (
-        (rel_vol > p["relative_volume_threshold"]) & (cl > op) & (pd.Series(clv) > 0.3)
+        (rel_vol > p["relative_volume_threshold"]) & (cl > op) & (clv > 0.3)
     )
 
     fl = int(p["flow_length"])
-    avg_mf = _sma(pd.Series(mfv), fl)
+    avg_mf = _sma(mfv, fl)
     avg_fv = _sma(vol, fl)
-    money_flow = np.where(avg_fv > 0, avg_mf / avg_fv, 0.0)
+    money_flow = (avg_mf / avg_fv).where(avg_fv > 0, 0.0)
     df["money_flow"] = money_flow
     df["signal_money_flow"] = money_flow > p["money_flow_threshold"]
 
     prev_cl = cl.shift(1)
-    up_vol = np.where(cl > prev_cl, vol, 0.0)
-    avg_up = _sma(pd.Series(up_vol), fl)
+    up_vol = vol.where(cl > prev_cl, 0.0)
+    avg_up = _sma(up_vol, fl)
     avg_tot = _sma(vol, fl)
-    up_ratio = np.where(avg_tot > 0, avg_up / avg_tot, 0.0)
+    up_ratio = (avg_up / avg_tot).where(avg_tot > 0, 0.0)
     df["up_volume_ratio"] = up_ratio
     df["signal_up_volume"] = up_ratio > p["up_volume_threshold"]
 
-    obv_chg = np.where(cl > prev_cl, vol, np.where(cl < prev_cl, -vol, 0.0))
-    obv = pd.Series(obv_chg, index=df.index).cumsum()
+    obv_chg = np.sign(cl - prev_cl) * vol
+    obv = obv_chg.cumsum()
     obv_ema = _ema(obv, int(p["obv_length"]))
     df["obv"] = obv
     df["signal_obv"] = (obv > obv_ema) & (obv > obv.shift(1))
 
-    adl = pd.Series(mfv, index=df.index).cumsum()
+    adl = mfv.cumsum()
     adl_mom = adl - adl.shift(fl)
     adl_acc = adl_mom - adl_mom.shift(1)
     df["adl_momentum"] = adl_mom
@@ -232,9 +267,11 @@ def compute_signals_monthly(
     if tqdm is not None and show_progress:
         sym_iter = tqdm(groups, desc="Accumulation signals", unit="symbol")
     for sym, g in sym_iter:
+        g = _normalize_ohlcv_frame(g)
         if len(g) < int(p["min_monthly_bars"]):
             continue
-        if g["Close"].iloc[-1] < float(p["min_price"]):
+        last_close = float(g["Close"].iloc[-1])
+        if not np.isfinite(last_close) or last_close < float(p["min_price"]):
             continue
         x = build_trade_signals(compute_accumulation_frame(g, p), p)
         x["Symbol"] = sym
@@ -529,6 +566,7 @@ def load_daily_ohlcv_panel(
     have = set(pq.ParquetFile(path).schema.names)
     load_cols = [c for c in cols if c in have]
     df = pd.read_parquet(path, columns=load_cols)
+    df = df.loc[:, ~pd.Index(df.columns).duplicated(keep="first")]
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
     if date_start:
         df = df.loc[df["Date"] >= pd.Timestamp(date_start)]

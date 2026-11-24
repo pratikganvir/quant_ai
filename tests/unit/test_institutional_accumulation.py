@@ -58,6 +58,17 @@ def test_accumulation_score_bounded():
     assert out["accumulation_score"].between(0, 5).all()
 
 
+def test_duplicate_ohlcv_columns_no_broadcast_error():
+    m = _synthetic_monthly(40)
+    dup = pd.DataFrame(
+        np.column_stack([m[c] for c in m.columns] + [m["Volume"]]),
+        columns=[*m.columns, "Volume"],
+    )
+    out = compute_accumulation_frame(dup)
+    assert len(out) == len(m)
+    assert out["accumulation_score"].between(0, 5).all()
+
+
 def test_backtest_returns_summary():
     m = _synthetic_monthly(48, drift=0.03)
     trades, eq = backtest_symbol_monthly(m)

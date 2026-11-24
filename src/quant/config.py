@@ -67,6 +67,12 @@ UPSTOX_RATE_PER_30MIN = int(os.getenv("UPSTOX_RATE_PER_30MIN", "1800"))
 UPSTOX_MIN_INTERVAL_S = float(os.getenv("UPSTOX_MIN_INTERVAL_S", "1.0"))
 UPSTOX_HTTP_MAX_ATTEMPTS = int(os.getenv("UPSTOX_HTTP_MAX_ATTEMPTS", "6"))
 
+# Historical candle max **inclusive** calendar days per HTTP request (Upstox v2 docs).
+UPSTOX_DAILY_MAX_INCLUSIVE_DAYS = int(os.getenv("UPSTOX_DAILY_MAX_INCLUSIVE_DAYS", "365"))
+UPSTOX_MONTHLY_MAX_INCLUSIVE_DAYS = int(
+    os.getenv("UPSTOX_MONTHLY_MAX_INCLUSIVE_DAYS", str(365 * 10))
+)
+
 # Preferred daily sync: upstox | tejhq (scripts only; both write nse_cm_*.parquet)
 DATA_SYNC_SOURCE = os.getenv("QUANT_DATA_SYNC_SOURCE", "upstox").lower()
 

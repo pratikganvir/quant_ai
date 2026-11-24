@@ -53,7 +53,7 @@ PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --symbols DALBHARAT,RELIA
 PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --materialize-only --start 2015-01-01
 ```
 
-Upstox daily candles return at most **~1 year per API call**; the client walks year-sized chunks and merges locally.
+Upstox daily candles return at most **365 calendar days (inclusive) per API call**; sync uses maximum-width forward chunks and widens short gaps to a full year via `expand_fetch_window`. Override with `UPSTOX_DAILY_MAX_INCLUSIVE_DAYS` if needed.
 
 **Rate limits** (standard APIs): 50/s, 500/min, **2000/30min**. The client enforces conservative defaults (~8/s, 90/min, 1800/30min) plus **429 retries** with `Retry-After`. Tune in `.env` if needed:
 
@@ -65,6 +65,19 @@ UPSTOX_MIN_INTERVAL_S=1.0
 ```
 
 Large first-time universe syncs can take multiple sessions; cached gzip chunks are not re-fetched.
+
+### Monthly cache MCP + REST
+
+After institutional notebook **Phase 0** (`nse_month` symbol parquets), expose inventory and OHLCV locally:
+
+```bash
+pip install -r requirements-mcp.txt
+PYTHONPATH=src python -m mcp_servers.quant_monthly --http 8765
+# GET http://127.0.0.1:8765/api/stocks
+# GET http://127.0.0.1:8765/api/monthly/RELIANCE?limit=60
+```
+
+Cursor MCP (stdio): see [`mcp_servers/quant_monthly/README.md`](mcp_servers/quant_monthly/README.md).
 
 Set `QUANT_DATA_SYNC_SOURCE=tejhq` if you still want TejHQ scripts by default on the VM.
 

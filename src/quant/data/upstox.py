@@ -19,8 +19,10 @@ import requests
 
 from quant.config import (
     UPSTOX_CACHE_DIR,
+    UPSTOX_DAILY_MAX_INCLUSIVE_DAYS,
     UPSTOX_HTTP_MAX_ATTEMPTS,
     UPSTOX_MIN_INTERVAL_S,
+    UPSTOX_MONTHLY_MAX_INCLUSIVE_DAYS,
     UPSTOX_RATE_PER_30MIN,
     UPSTOX_RATE_PER_MINUTE,
     UPSTOX_RATE_PER_SECOND,
@@ -38,9 +40,7 @@ from quant.data.tejhq import (
 
 UPSTOX_BASE_URL = "https://api.upstox.com/v2"
 NSE_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-MAX_DAILY_RANGE_DAYS = 364
-MAX_MONTHLY_RANGE_DAYS = 364 * 10 - 1  # Upstox: up to ~10y of month candles per call
-CandleInterval = str  # day | month
+CandleInterval = str  # day | month | week
 
 
 class UpstoxError(RuntimeError):
@@ -116,8 +116,9 @@ def instruments_map_path(cache_root: Path) -> Path:
     return cache_root / "instruments" / "nse_eq_map.json.gz"
 
 
-def symbol_history_path(cache_root: Path, symbol: str) -> Path:
-    return cache_root / "symbols" / "nse" / f"{symbol.upper()}.parquet"
+def symbol_history_path(cache_root: Path, symbol: str, *, interval: CandleInterval = "day") -> Path:
+    sub = "nse" if interval == "day" else f"nse_{interval}"
+    return cache_root / "symbols" / sub / f"{symbol.upper()}.parquet"
 
 
 def candle_api_cache_path(
@@ -180,25 +181,60 @@ def candles_to_dataframe(candles: Sequence[Sequence[Any]], symbol: str) -> pd.Da
     return out[cols]
 
 
-def _year_chunks(start: date, end: date) -> list[tuple[date, date]]:
-    return _range_chunks(start, end, MAX_DAILY_RANGE_DAYS)
+def max_inclusive_calendar_days(interval: CandleInterval) -> int:
+    """Widest inclusive date span per Upstox historical-candle request."""
+    if interval in ("month", "week"):
+        return UPSTOX_MONTHLY_MAX_INCLUSIVE_DAYS
+    return UPSTOX_DAILY_MAX_INCLUSIVE_DAYS
 
 
-def _range_chunks(start: date, end: date, max_span_days: int) -> list[tuple[date, date]]:
-    """Split [start, end] into widest contiguous spans allowed by the API."""
+def _max_span_add_days(interval: CandleInterval) -> int:
+    """``timedelta`` days to add to chunk start (inclusive end = start + this)."""
+    return max_inclusive_calendar_days(interval) - 1
+
+
+def expand_fetch_window(
+    from_d: date,
+    to_d: date,
+    *,
+    interval: CandleInterval = "day",
+) -> tuple[date, date]:
+    """Widen a short gap to the API's maximum window ending at ``to_d`` (fewer redundant calls)."""
+    if to_d < from_d:
+        return from_d, to_d
+    max_inc = max_inclusive_calendar_days(interval)
+    span = (to_d - from_d).days + 1
+    if span >= max_inc:
+        return from_d, to_d
+    from_wide = to_d - timedelta(days=max_inc - 1)
+    return from_wide, to_d
+
+
+def _range_chunks(
+    start: date,
+    end: date,
+    *,
+    interval: CandleInterval = "day",
+) -> list[tuple[date, date]]:
+    """Split [start, end] into the fewest contiguous chunks (all full width except possibly the last)."""
+    if end < start:
+        return []
+    max_add = _max_span_add_days(interval)
     chunks: list[tuple[date, date]] = []
     d = start
     while d <= end:
-        chunk_end = min(d + timedelta(days=max_span_days), end)
+        chunk_end = min(d + timedelta(days=max_add), end)
         chunks.append((d, chunk_end))
         d = chunk_end + timedelta(days=1)
     return chunks
 
 
+def _year_chunks(start: date, end: date) -> list[tuple[date, date]]:
+    return _range_chunks(start, end, interval="day")
+
+
 def _interval_chunks(interval: CandleInterval, start: date, end: date) -> list[tuple[date, date]]:
-    if interval == "month":
-        return _range_chunks(start, end, MAX_MONTHLY_RANGE_DAYS)
-    return _year_chunks(start, end)
+    return _range_chunks(start, end, interval=interval)
 
 
 def symbol_fetch_ranges(
@@ -241,7 +277,10 @@ def estimate_symbol_http_calls(
         return len(chunks)
     n = 0
     for a, b in chunks:
-        if read_json_cache(candle_api_cache_path(cache_root, instrument_key, b, a, interval=interval)) is None:
+        fetch_from, fetch_to = expand_fetch_window(a, b, interval=interval)
+        if read_json_cache(
+            candle_api_cache_path(cache_root, instrument_key, fetch_to, fetch_from, interval=interval)
+        ) is None:
             n += 1
     return n
 
@@ -368,21 +407,22 @@ class UpstoxClient:
         start: date,
         end: date,
         *,
+        interval: CandleInterval = "day",
         refresh_cache: bool = False,
     ) -> dict[str, Any]:
         sym = symbol.strip().upper()
         imap = self.load_nse_eq_map()
         inst = imap.get(sym)
         if not inst:
-            return {"symbol": sym, "status": "unknown_symbol", "rows": 0}
-        out_path = symbol_history_path(self.cache_dir, sym)
+            return {"symbol": sym, "status": "unknown_symbol", "rows": 0, "interval": interval}
+        out_path = symbol_history_path(self.cache_dir, sym, interval=interval)
         existing = pd.DataFrame()
         if out_path.is_file() and not refresh_cache:
             existing = pd.read_parquet(out_path)
             if "date" in existing.columns:
                 existing["date"] = pd.to_datetime(existing["date"]).dt.date
 
-        ranges_to_fetch = symbol_fetch_ranges(existing, start, end, interval="day")
+        ranges_to_fetch = symbol_fetch_ranges(existing, start, end, interval=interval)
         if not ranges_to_fetch and not existing.empty:
             return {
                 "symbol": sym,
@@ -390,16 +430,22 @@ class UpstoxClient:
                 "rows": len(existing),
                 "path": str(out_path),
                 "api_calls": 0,
+                "interval": interval,
             }
 
         frames = [existing] if not existing.empty else []
         api_calls = 0
         for a, b in ranges_to_fetch:
+            fetch_from, fetch_to = expand_fetch_window(a, b, interval=interval)
             if not refresh_cache and read_json_cache(
-                candle_api_cache_path(self.cache_dir, inst, b, a, interval="day")
+                candle_api_cache_path(
+                    self.cache_dir, inst, fetch_to, fetch_from, interval=interval
+                )
             ) is None:
                 api_calls += 1
-            candles = self.fetch_candles(inst, a, b, interval="day", refresh_cache=refresh_cache)
+            candles = self.fetch_candles(
+                inst, fetch_from, fetch_to, interval=interval, refresh_cache=refresh_cache
+            )
             chunk = candles_to_dataframe(candles, sym)
             if not chunk.empty:
                 frames.append(chunk)
@@ -420,6 +466,7 @@ class UpstoxClient:
             "first": str(merged["date"].min()),
             "last": str(merged["date"].max()),
             "api_calls": api_calls,
+            "interval": interval,
         }
 
     def materialize_day(self, parquet_root: Path, day: date, *, overwrite: bool = False) -> dict[str, Any]:
@@ -493,11 +540,34 @@ def materialize_nse_cm_range(
     return pd.DataFrame(rows)
 
 
-def list_cached_symbols(cache_root: Path) -> list[str]:
-    d = cache_root / "symbols" / "nse"
+def list_cached_symbols(cache_root: Path, *, interval: CandleInterval = "day") -> list[str]:
+    sub = "nse" if interval == "day" else f"nse_{interval}"
+    d = cache_root / "symbols" / sub
     if not d.is_dir():
         return []
     return sorted(p.stem.upper() for p in d.glob("*.parquet"))
+
+
+def latest_monthly_cache_date(cache_root: Path) -> date | None:
+    """Latest bar date across per-symbol monthly Upstox symbol parquets."""
+    d = cache_root / "symbols" / "nse_month"
+    if not d.is_dir():
+        return None
+    latest: date | None = None
+    for path in d.glob("*.parquet"):
+        try:
+            df = pd.read_parquet(path, columns=["date"])
+            if df.empty:
+                continue
+            mx = pd.to_datetime(df["date"]).max()
+            if pd.isna(mx):
+                continue
+            bar = mx.date()
+            if latest is None or bar > latest:
+                latest = bar
+        except Exception:
+            continue
+    return latest
 
 
 def append_symbol_manifest(row: Mapping[str, Any], path: Path = UPSTOX_SYMBOL_MANIFEST_PATH) -> None:
@@ -522,17 +592,20 @@ def sync_upstox_universe(
     start: date,
     end: date,
     *,
+    interval: CandleInterval = "day",
     client: UpstoxClient | None = None,
     symbols: Sequence[str] | None = None,
     max_symbols: int | None = None,
     refresh_cache: bool = False,
-    materialize: bool = True,
+    materialize: bool | None = None,
     materialize_only_missing: bool = True,
     overwrite_parquet: bool = False,
     dry_run: bool = False,
     show_progress: bool = True,
 ) -> pd.DataFrame:
-    """Fetch per-symbol day history (cached), then write ``nse_cm_YYYYMMDD.parquet`` files."""
+    """Fetch per-symbol history (cached). Materializes ``nse_cm_*`` only for ``interval=day``."""
+    if materialize is None:
+        materialize = interval == "day"
     client = client or UpstoxClient()
     imap = client.load_nse_eq_map()
     syms = [s.upper() for s in (symbols or sorted(imap))]
@@ -550,17 +623,22 @@ def sync_upstox_universe(
             if not inst:
                 planned.append({"symbol": sym, "status": "unknown_symbol", "api_calls_est": 0})
                 continue
-            path = symbol_history_path(client.cache_dir, sym)
+            path = symbol_history_path(client.cache_dir, sym, interval=interval)
             existing = pd.DataFrame()
             if path.is_file():
                 existing = pd.read_parquet(path)
-            chunks = symbol_fetch_ranges(existing, start, end, interval="day")
+            chunks = symbol_fetch_ranges(existing, start, end, interval=interval)
             planned.append(
                 {
                     "symbol": sym,
                     "status": "would_sync" if chunks else "cached",
+                    "interval": interval,
                     "api_calls_est": estimate_symbol_http_calls(
-                        client.cache_dir, inst, chunks, interval="day", refresh_cache=refresh_cache
+                        client.cache_dir,
+                        inst,
+                        chunks,
+                        interval=interval,
+                        refresh_cache=refresh_cache,
                     ),
                 }
             )
@@ -573,13 +651,13 @@ def sync_upstox_universe(
 
     sym_iter: Iterable[str] = syms
     if show_progress and _tqdm is not None:
-        sym_iter = _tqdm(syms, desc="Upstox symbol sync", unit="sym")
+        sym_iter = _tqdm(syms, desc=f"Upstox sync ({interval})", unit="sym")
 
     rows: list[dict[str, Any]] = []
     api_calls = 0
     for sym in sym_iter:
         try:
-            r = client.sync_symbol(sym, start, end, refresh_cache=refresh_cache)
+            r = client.sync_symbol(sym, start, end, interval=interval, refresh_cache=refresh_cache)
             rows.append(r)
             api_calls += int(r.get("api_calls") or 0)
             append_symbol_manifest({**r, "fetched_at": datetime.utcnow().isoformat()})
@@ -639,6 +717,7 @@ def sync_upstox_for_monthly_backtest(
     *,
     date_start: date,
     date_end: date | None = None,
+    interval: CandleInterval = "month",
     client: UpstoxClient | None = None,
     symbols: Sequence[str] | None = None,
     max_symbols: int | None = None,
@@ -648,29 +727,41 @@ def sync_upstox_for_monthly_backtest(
     dry_run: bool = False,
     show_progress: bool = True,
 ) -> dict[str, Any]:
-    """Sync only absent symbol history / daily parquets for a monthly backtest window."""
+    """Sync absent per-symbol history for institutional monthly backtest (default: ``month`` candles)."""
     end_d = date_end or date.today()
+    client = client or UpstoxClient()
     df = sync_upstox_universe(
         parquet_root,
         date_start,
         end_d,
+        interval=interval,
         client=client,
         symbols=symbols,
         max_symbols=max_symbols,
         refresh_cache=refresh_cache,
-        materialize=True,
         materialize_only_missing=materialize_only_missing,
         overwrite_parquet=overwrite_parquet,
         dry_run=dry_run,
         show_progress=show_progress,
     )
-    missing = missing_parquet_weekdays(parquet_root, date_start, end_d)
+    missing = (
+        missing_parquet_weekdays(parquet_root, date_start, end_d)
+        if interval == "day"
+        else []
+    )
     sym_rows = df[df["symbol"].notna()] if not df.empty and "symbol" in df.columns else df
     statuses = sym_rows["status"].value_counts().to_dict() if not sym_rows.empty and "status" in sym_rows.columns else {}
     return {
         "start": date_start.isoformat(),
         "end": end_d.isoformat(),
+        "interval": interval,
+        "max_inclusive_days": max_inclusive_calendar_days(interval),
         "missing_weekdays_after": len(missing),
+        "monthly_cache_latest": (
+            str(latest_monthly_cache_date(client.cache_dir))
+            if interval == "month"
+            else None
+        ),
         "symbol_status_counts": statuses,
         "n_symbols": int(len(sym_rows)) if not sym_rows.empty else 0,
     }

@@ -1029,7 +1029,7 @@ def ensure_upstox_daily_for_monthly(
     dry_run: bool = False,
     show_progress: bool = True,
 ) -> dict[str, Any]:
-    """Fetch only missing Upstox daily history and materialize absent ``nse_cm_*`` days."""
+    """Fetch missing Upstox **daily** history and materialize ``nse_cm_*`` (CLI / other notebooks)."""
     from datetime import date as date_cls
 
     from quant.config import PARQUET_DATA_DIR
@@ -1041,6 +1041,104 @@ def ensure_upstox_daily_for_monthly(
         PARQUET_DATA_DIR,
         date_start=start_d,
         date_end=end_d,
+        interval="day",
+        symbols=symbols,
+        max_symbols=max_symbols,
+        refresh_cache=refresh_cache,
+        dry_run=dry_run,
+        show_progress=show_progress,
+    )
+
+
+def build_monthly_ohlcv_panel_from_upstox(
+    *,
+    date_start: str | None = None,
+    date_end: str | None = None,
+    symbols: Sequence[str] | None = None,
+    cache_dir: Path | None = None,
+    show_progress: bool = True,
+) -> pd.DataFrame:
+    """Load Upstox ``month`` candle symbol parquets into a long OHLCV panel (no API)."""
+    from quant.config import UPSTOX_CACHE_DIR
+    from quant.data.upstox import list_cached_symbols, symbol_history_path
+
+    root = cache_dir or UPSTOX_CACHE_DIR
+    syms = [s.upper() for s in symbols] if symbols else list_cached_symbols(root, interval="month")
+    if not syms:
+        raise FileNotFoundError(
+            f"No monthly Upstox symbol cache under {root / 'symbols' / 'nse_month'}. Run Phase 0 sync."
+        )
+
+    start_d = pd.Timestamp(date_start).date() if date_start else None
+    end_d = pd.Timestamp(date_end).date() if date_end else None
+
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:  # pragma: no cover
+        tqdm = None  # type: ignore
+
+    sym_iter: Iterable[str] = syms
+    if show_progress and tqdm is not None:
+        sym_iter = tqdm(syms, desc="Load Upstox monthly cache", unit="symbol")
+
+    parts: list[pd.DataFrame] = []
+    cols = ["Date", "Symbol", "Open", "High", "Low", "Close", "Volume"]
+    for sym in sym_iter:
+        path = symbol_history_path(root, sym, interval="month")
+        if not path.is_file():
+            continue
+        df = pd.read_parquet(path)
+        if df.empty:
+            continue
+        df = df.rename(
+            columns={
+                "date": "Date",
+                "symbol": "Symbol",
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+            }
+        )
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+        df["Symbol"] = sym
+        if start_d is not None:
+            df = df.loc[df["Date"].dt.date >= start_d]
+        if end_d is not None:
+            df = df.loc[df["Date"].dt.date <= end_d]
+        if df.empty:
+            continue
+        parts.append(df[cols])
+
+    if not parts:
+        raise FileNotFoundError("No monthly rows in range from Upstox symbol cache.")
+    return pd.concat(parts, ignore_index=True).sort_values(["Symbol", "Date"]).reset_index(drop=True)
+
+
+def ensure_upstox_monthly_for_monthly(
+    *,
+    date_start: str,
+    date_end: str | None = None,
+    symbols: Sequence[str] | None = None,
+    max_symbols: int | None = None,
+    refresh_cache: bool = False,
+    dry_run: bool = False,
+    show_progress: bool = True,
+) -> dict[str, Any]:
+    """Fetch only missing Upstox **month** candles (max ~10y window per API call)."""
+    from datetime import date as date_cls
+
+    from quant.config import PARQUET_DATA_DIR
+    from quant.data.upstox import sync_upstox_for_monthly_backtest
+
+    start_d = pd.Timestamp(date_start).date()
+    end_d = pd.Timestamp(date_end).date() if date_end else date_cls.today()
+    return sync_upstox_for_monthly_backtest(
+        PARQUET_DATA_DIR,
+        date_start=start_d,
+        date_end=end_d,
+        interval="month",
         symbols=symbols,
         max_symbols=max_symbols,
         refresh_cache=refresh_cache,

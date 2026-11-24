@@ -1,4 +1,4 @@
-"""Institutional accumulation strategy (monthly bars) — indicators and backtest."""
+"""Institutional Accumulation — Balanced V4.7 (monthly bars, NSE backtest)."""
 
 from __future__ import annotations
 
@@ -8,29 +8,45 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-INST_ACC_ENGINE_VERSION = "3"  # v3: normalize OHLCV frame at ingest (duplicate panel columns)
+INST_ACC_ENGINE_VERSION = "4.7"
+STRATEGY_LABEL = "Institutional Accumulation - Balanced V4.7"
 
 DEFAULT_PARAMS: dict[str, Any] = {
-    "flow_length": 6,
+    # Entry — accumulation
     "volume_length": 12,
-    "obv_length": 12,
-    "relative_volume_threshold": 1.2,
-    "money_flow_threshold": 0.15,
-    "up_volume_threshold": 0.60,
-    "required_score": 4,
-    "ema_length": 12,
-    "use_trend_filter": True,
-    "use_breakout": False,
-    "breakout_length": 6,
-    "stop_loss_percent": 10.0,
-    "use_trend_exit": True,
-    "use_accumulation_exit": True,
-    "exit_score": 1,
-    "use_cooldown": True,
-    "cooldown_months": 3,
+    "relative_volume_min": 1.2,
+    "up_volume_threshold": 0.55,
+    "accumulation_needed": 3,
+    "obv_ema_length": 10,
+    "adl_lookback": 6,
+    # Entry — regime
+    "entry_ema_length": 12,
+    "ema_slope_lookback": 6,
+    "minimum_ema_slope_pct": 2.0,
+    "adx_length": 14,
+    "adx_smoothing": 14,
+    "minimum_adx": 20.0,
+    "efficiency_length": 10,
+    "minimum_efficiency": 0.30,
+    "breakout_length": 12,
+    "use_breakout": True,
+    # Risk — protective stop
+    "atr_length": 14,
+    "initial_stop_atr": 2.5,
+    "maximum_initial_stop_percent": 20.0,
+    "profit_activation_atr": 2.0,
+    "profit_trail_atr": 3.5,
+    "minimum_profit_atr": 1.5,
+    # Exit — larger trend
+    "medium_ema_length": 12,
+    "slow_ema_length": 24,
+    "trend_confirm_bars": 2,
+    "minimum_holding_bars": 2,
+    "cooldown_bars": 2,
+    # Portfolio
     "initial_capital": 100_000.0,
-    "position_pct": 10.0,
-    "min_monthly_bars": 24,
+    "position_pct": 100.0,
+    "min_monthly_bars": 36,
     "min_price": 5.0,
     "eq_only": True,
 }
@@ -42,23 +58,15 @@ def strategy_params_fingerprint(params: dict | None = None) -> dict[str, Any]:
 
 
 def resample_symbol_to_monthly(g: pd.DataFrame) -> pd.DataFrame:
-    """Calendar month-end OHLCV for one symbol (daily rows, sorted by Date)."""
     g = g.sort_values("Date").copy()
     g["Date"] = pd.to_datetime(g["Date"])
     g = g.set_index("Date")
     if g.empty:
         return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
     m = g.resample("ME").agg(
-        {
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum",
-        }
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
     )
-    m = m.dropna(subset=["Close"])
-    m = m.reset_index().rename(columns={"index": "Date"})
+    m = m.dropna(subset=["Close"]).reset_index()
     return m
 
 
@@ -78,20 +86,45 @@ def resample_panel_to_monthly(daily: pd.DataFrame) -> pd.DataFrame:
         parts.append(m)
     if not parts:
         return pd.DataFrame(columns=cols)
-    out = pd.concat(parts, ignore_index=True)
-    return out.sort_values(["Symbol", "Date"]).reset_index(drop=True)
+    return pd.concat(parts, ignore_index=True).sort_values(["Symbol", "Date"]).reset_index(drop=True)
 
 
 def _ema(s: pd.Series, length: int) -> pd.Series:
     return s.ewm(span=length, adjust=False, min_periods=length).mean()
 
 
-def _sma(s: pd.Series, length: int) -> pd.Series:
-    return s.rolling(length, min_periods=length).mean()
+def _rma(s: pd.Series, length: int) -> pd.Series:
+    return s.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
+
+
+def _rolling_sum(s: pd.Series, length: int) -> pd.Series:
+    return s.rolling(length, min_periods=length).sum()
+
+
+def _atr(h: pd.Series, lo: pd.Series, cl: pd.Series, length: int) -> pd.Series:
+    prev = cl.shift(1)
+    tr = pd.concat([(h - lo).abs(), (h - prev).abs(), (lo - prev).abs()], axis=1).max(axis=1)
+    return _rma(tr, length)
+
+
+def _dmi_adx(
+    h: pd.Series, lo: pd.Series, cl: pd.Series, length: int, smooth: int
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    up = h - h.shift(1)
+    dn = lo.shift(1) - lo
+    plus_dm = np.where((up > dn) & (up > 0), up, 0.0)
+    minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    prev = cl.shift(1)
+    tr = pd.concat([(h - lo).abs(), (h - prev).abs(), (lo - prev).abs()], axis=1).max(axis=1)
+    tr_r = _rma(tr, length)
+    plus_di = 100 * _rma(pd.Series(plus_dm, index=h.index), length) / tr_r.replace(0, np.nan)
+    minus_di = 100 * _rma(pd.Series(minus_dm, index=h.index), length) / tr_r.replace(0, np.nan)
+    dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    adx = _rma(dx, smooth)
+    return plus_di, minus_di, adx
 
 
 def _series_1d(df: pd.DataFrame, col: str) -> pd.Series:
-    """Single float Series for OHLCV col (handles duplicate column names from wide panels)."""
     if col not in df.columns:
         return pd.Series(dtype=float)
     loc = df.columns.get_loc(col)
@@ -105,9 +138,9 @@ def _series_1d(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Exactly one column per OHLCV field (panels may repeat Volume/Close)."""
     if df.empty:
         return df
+    vol = _series_1d(df, "Volume").fillna(0.0)
     return pd.DataFrame(
         {
             "Date": pd.to_datetime(df["Date"], errors="coerce"),
@@ -115,133 +148,227 @@ def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
             "High": _series_1d(df, "High"),
             "Low": _series_1d(df, "Low"),
             "Close": _series_1d(df, "Close"),
-            "Volume": _series_1d(df, "Volume"),
+            "Volume": vol,
         }
     ).dropna(subset=["Date"]).reset_index(drop=True)
 
 
+def _initial_stop_price(entry_px: float, entry_atr: float, p: dict) -> float:
+    atr_stop = entry_px - entry_atr * float(p["initial_stop_atr"])
+    pct_stop = entry_px * (1 - float(p["maximum_initial_stop_percent"]) / 100.0)
+    return float(max(atr_stop, pct_stop))
+
+
+def _exit_stop_price(open_px: float, low_px: float, stop: float) -> float:
+    if low_px <= stop:
+        return float(open_px if open_px < stop else stop)
+    return np.nan
+
+
 def compute_accumulation_frame(monthly: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
-    """Monthly OHLCV for one symbol → indicators, scores, buy/sell flags (no lookahead in rolls)."""
+    """Indicators + entry_condition (Pine V4.7, no position state)."""
     p = {**DEFAULT_PARAMS, **(params or {})}
     df = _normalize_ohlcv_frame(monthly)
     if df.empty:
         return df
 
-    h = _series_1d(df, "High")
-    lo = _series_1d(df, "Low")
-    cl = _series_1d(df, "Close")
-    op = _series_1d(df, "Open")
-    vol = _series_1d(df, "Volume")
+    h, lo, cl = _series_1d(df, "High"), _series_1d(df, "Low"), _series_1d(df, "Close")
+    vol = _series_1d(df, "Volume").fillna(0.0)
+    vl = int(p["volume_length"])
+
     rng = h - lo
     clv = ((cl - lo) - (h - cl)) / rng
     clv = clv.where(rng > 0, 0.0)
-    df["clv"] = clv
     mfv = clv * vol
-    df["money_flow_volume"] = mfv
 
-    avg_vol = _sma(vol, int(p["volume_length"]))
+    avg_vol = vol.rolling(vl, min_periods=vl).mean()
     rel_vol = (vol / avg_vol).where(avg_vol > 0, 0.0)
-    df["relative_volume"] = rel_vol
-    df["signal_volume"] = (
-        (rel_vol > p["relative_volume_threshold"]) & (cl > op) & (clv > 0.3)
-    )
+    volume_condition = rel_vol >= float(p["relative_volume_min"])
 
-    fl = int(p["flow_length"])
-    avg_mf = _sma(mfv, fl)
-    avg_fv = _sma(vol, fl)
-    money_flow = (avg_mf / avg_fv).where(avg_fv > 0, 0.0)
-    df["money_flow"] = money_flow
-    df["signal_money_flow"] = money_flow > p["money_flow_threshold"]
+    mf_sum = _rolling_sum(mfv, vl)
+    money_flow_condition = (mf_sum > 0) & (clv > 0)
 
     prev_cl = cl.shift(1)
     up_vol = vol.where(cl > prev_cl, 0.0)
-    avg_up = _sma(up_vol, fl)
-    avg_tot = _sma(vol, fl)
-    up_ratio = (avg_up / avg_tot).where(avg_tot > 0, 0.0)
-    df["up_volume_ratio"] = up_ratio
-    df["signal_up_volume"] = up_ratio > p["up_volume_threshold"]
+    tot_vol = _rolling_sum(vol, vl)
+    up_vol_sum = _rolling_sum(up_vol, vl)
+    up_ratio = (up_vol_sum / tot_vol).where(tot_vol > 0, 0.0)
+    up_volume_condition = up_ratio >= float(p["up_volume_threshold"])
 
     obv_chg = np.sign(cl - prev_cl) * vol
     obv = obv_chg.cumsum()
-    obv_ema = _ema(obv, int(p["obv_length"]))
-    df["obv"] = obv
-    df["signal_obv"] = (obv > obv_ema) & (obv > obv.shift(1))
+    obv_avg = _ema(obv, int(p["obv_ema_length"]))
+    obv_condition = obv > obv_avg
 
     adl = mfv.cumsum()
-    adl_mom = adl - adl.shift(fl)
-    adl_acc = adl_mom - adl_mom.shift(1)
-    df["adl_momentum"] = adl_mom
-    df["adl_acceleration"] = adl_acc
-    df["signal_adl"] = (adl_mom > 0) & (adl_acc > 0)
+    adl_lb = int(p["adl_lookback"])
+    adl_condition = adl > adl.shift(adl_lb)
 
-    df["accumulation_score"] = (
-        df["signal_volume"].astype(int)
-        + df["signal_money_flow"].astype(int)
-        + df["signal_up_volume"].astype(int)
-        + df["signal_obv"].astype(int)
-        + df["signal_adl"].astype(int)
+    score = (
+        volume_condition.astype(int)
+        + money_flow_condition.astype(int)
+        + up_volume_condition.astype(int)
+        + obv_condition.astype(int)
+        + adl_condition.astype(int)
     )
+    accumulation_condition = score >= int(p["accumulation_needed"])
 
-    ema = _ema(cl, int(p["ema_length"]))
-    df["trend_ema"] = ema
-    trend_ok = (~p["use_trend_filter"]) | ((cl > ema) & (ema > ema.shift(1)))
-    df["trend_condition"] = trend_ok
+    entry_ema = _ema(cl, int(p["entry_ema_length"]))
+    lb = int(p["ema_slope_lookback"])
+    denom = entry_ema.shift(lb)
+    ema_slope = ((entry_ema / denom - 1) * 100).where((denom > 0) & denom.notna(), 0.0)
+    ema_trend_condition = (cl > entry_ema) & (ema_slope >= float(p["minimum_ema_slope_pct"]))
+
+    plus_di, minus_di, adx = _dmi_adx(h, lo, cl, int(p["adx_length"]), int(p["adx_smoothing"]))
+    adx_condition = (adx > float(p["minimum_adx"])) & (plus_di > minus_di)
+
+    eff = int(p["efficiency_length"])
+    price_change = (cl - cl.shift(eff)).abs()
+    abs_chg_sum = cl.diff().abs().rolling(eff, min_periods=eff).sum()
+    efficiency_ratio = (price_change / abs_chg_sum).where(abs_chg_sum > 0, 0.0)
+    efficiency_condition = efficiency_ratio >= float(p["minimum_efficiency"])
 
     bl = int(p["breakout_length"])
     prev_high = h.shift(1).rolling(bl, min_periods=bl).max()
-    brk_ok = (~p["use_breakout"]) | (cl > prev_high)
-    df["breakout_condition"] = brk_ok
+    breakout_condition = cl > prev_high
+    breakout_filter = (~bool(p["use_breakout"])) | breakout_condition
 
-    df["raw_buy"] = (
-        (df["accumulation_score"] >= int(p["required_score"]))
-        & df["trend_condition"]
-        & df["breakout_condition"]
+    entry_condition = (
+        accumulation_condition
+        & ema_trend_condition
+        & adx_condition
+        & efficiency_condition
+        & breakout_filter
     )
 
-    trend_exit = p["use_trend_exit"] & (cl < ema)
-    acc_exit = p["use_accumulation_exit"] & (df["accumulation_score"] <= int(p["exit_score"]))
-    df["raw_sell"] = trend_exit | acc_exit
+    atr_value = _atr(h, lo, cl, int(p["atr_length"]))
+    medium_ema = _ema(cl, int(p["medium_ema_length"]))
+    slow_ema = _ema(cl, int(p["slow_ema_length"]))
+    tcb = int(p["trend_confirm_bars"])
+    below_medium = (cl < medium_ema).astype(float)
+    below_medium_count = below_medium.rolling(tcb, min_periods=tcb).sum()
+    trend_ready = medium_ema.shift(tcb - 1).notna() & slow_ema.notna()
+    confirmed_medium_breakdown = trend_ready & (below_medium_count == tcb)
+    larger_trend_bearish = medium_ema < slow_ema
 
+    df = df.assign(
+        clv=clv,
+        relative_volume=rel_vol,
+        up_volume_ratio=up_ratio,
+        accumulation_score=score,
+        entry_ema=entry_ema,
+        ema_slope_pct=ema_slope,
+        adx=adx,
+        plus_di=plus_di,
+        minus_di=minus_di,
+        efficiency_ratio=efficiency_ratio,
+        atr=atr_value,
+        medium_ema=medium_ema,
+        slow_ema=slow_ema,
+        below_medium_count=below_medium_count,
+        entry_condition=entry_condition,
+        confirmed_medium_breakdown=confirmed_medium_breakdown,
+        larger_trend_bearish=larger_trend_bearish,
+    )
     return df
 
 
+@dataclass
+class _PositionBarState:
+    entry_bar: int
+    entry_px: float
+    entry_atr: float
+    initial_stop: float
+    highest_since_entry: float
+    profit_trail_stop: float | None
+    active_stop: float
+
+
+def _update_profit_trail(
+    st: _PositionBarState,
+    *,
+    high: float,
+    atr: float,
+    p: dict,
+) -> None:
+    if atr <= 0 or not np.isfinite(atr):
+        return
+    st.highest_since_entry = max(st.highest_since_entry, high)
+    max_gain_atr = (st.highest_since_entry - st.entry_px) / st.entry_atr
+    if max_gain_atr < float(p["profit_activation_atr"]):
+        st.active_stop = st.initial_stop
+        return
+    trail = st.highest_since_entry - atr * float(p["profit_trail_atr"])
+    lock = st.entry_px + st.entry_atr * float(p["minimum_profit_atr"])
+    candidate = max(trail, lock)
+    prev = st.profit_trail_stop if st.profit_trail_stop is not None else candidate
+    st.profit_trail_stop = max(prev, candidate)
+    st.active_stop = max(st.initial_stop, st.profit_trail_stop)
+
+
+def _larger_trend_exit(row: pd.Series, *, bars_held: int, p: dict) -> bool:
+    if bars_held < int(p["minimum_holding_bars"]):
+        return False
+    return bool(row["confirmed_medium_breakdown"] and row["larger_trend_bearish"])
+
+
 def build_trade_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
-    """Bar-aligned buy/sell flags matching the monthly backtest (stop, exit, cooldown)."""
+    """Buy/sell flags aligned with V4.7 simulator (next-bar open fills)."""
     p = {**DEFAULT_PARAMS, **(params or {})}
-    out = df.copy()
-    cd = int(p["cooldown_months"])
+    out = compute_accumulation_frame(df, p) if "entry_condition" not in df.columns else df.copy()
     n = len(out)
     buy = np.zeros(n, dtype=bool)
     sell = np.zeros(n, dtype=bool)
-    in_pos = False
-    pending_entry = False
+    cd = int(p["cooldown_bars"])
     last_exit: int | None = None
-    stop_px = np.nan
+    pos: _PositionBarState | None = None
+    pending_atr: float | None = None
+    trend_exit_pending = False
 
     for i in range(n):
         row = out.iloc[i]
-        opn, lo = float(row["Open"]), float(row["Low"])
-        if pending_entry:
-            in_pos = True
-            pending_entry = False
-            stop_px = opn * (1 - float(p["stop_loss_percent"]) / 100.0)
+        opn, hi, lo = float(row["Open"]), float(row["High"]), float(row["Low"])
 
-        if in_pos:
-            hit = _exit_stop_price(opn, lo, stop_px)
+        if pos is not None and trend_exit_pending:
+            sell[i] = True
+            pos = None
+            last_exit = i
+            trend_exit_pending = False
+
+        if pos is not None:
+            hit = _exit_stop_price(opn, lo, pos.active_stop)
             if np.isfinite(hit):
                 sell[i] = True
-                in_pos = False
+                pos = None
                 last_exit = i
-            elif bool(row["raw_sell"]):
-                sell[i] = True
-                in_pos = False
-                last_exit = i
+            elif i > 0:
+                bars_held = i - pos.entry_bar
+                if _larger_trend_exit(out.iloc[i - 1], bars_held=bars_held, p=p):
+                    trend_exit_pending = True
 
-        if not in_pos and not pending_entry and bool(row["raw_buy"]):
-            cooled = (not p["use_cooldown"]) or last_exit is None or (i - last_exit) >= cd
-            if cooled and i + 1 < n:
+        if pos is None and pending_atr is not None:
+            entry_px = opn
+            entry_atr = pending_atr if np.isfinite(pending_atr) and pending_atr > 0 else float(row["atr"])
+            initial = _initial_stop_price(entry_px, entry_atr, p)
+            pos = _PositionBarState(
+                entry_bar=i,
+                entry_px=entry_px,
+                entry_atr=entry_atr,
+                initial_stop=initial,
+                highest_since_entry=hi,
+                profit_trail_stop=None,
+                active_stop=initial,
+            )
+            pending_atr = None
+
+        cooled = last_exit is None or (i - last_exit) > cd
+        if pos is None and pending_atr is None and cooled and bool(row["entry_condition"]):
+            if i + 1 < n:
                 buy[i] = True
-                pending_entry = True
+                pending_atr = float(row["atr"]) if np.isfinite(row["atr"]) else np.nan
+
+        if pos is not None and not (pos.entry_bar == i):
+            _update_profit_trail(pos, high=hi, atr=float(row["atr"]), p=p)
 
     out["buy_signal"] = buy
     out["sell_signal"] = sell
@@ -254,7 +381,6 @@ def compute_signals_monthly(
     *,
     show_progress: bool = True,
 ) -> pd.DataFrame:
-    """Full panel monthly bars with signals."""
     try:
         from tqdm.auto import tqdm
     except ImportError:  # pragma: no cover
@@ -263,9 +389,9 @@ def compute_signals_monthly(
     p = {**DEFAULT_PARAMS, **(params or {})}
     parts: list[pd.DataFrame] = []
     groups = list(monthly.groupby("Symbol", observed=True))
-    sym_iter = groups
+    sym_iter: Any = groups
     if tqdm is not None and show_progress:
-        sym_iter = tqdm(groups, desc="Accumulation signals", unit="symbol")
+        sym_iter = tqdm(groups, desc="V4.7 signals", unit="symbol")
     for sym, g in sym_iter:
         g = _normalize_ohlcv_frame(g)
         if len(g) < int(p["min_monthly_bars"]):
@@ -273,7 +399,7 @@ def compute_signals_monthly(
         last_close = float(g["Close"].iloc[-1])
         if not np.isfinite(last_close) or last_close < float(p["min_price"]):
             continue
-        x = build_trade_signals(compute_accumulation_frame(g, p), p)
+        x = build_trade_signals(g, p)
         x["Symbol"] = sym
         parts.append(x)
     if not parts:
@@ -293,93 +419,112 @@ class BacktestSummary:
     profitable: bool
 
 
-def _exit_stop_price(open_px: float, low_px: float, stop: float) -> float:
-    if low_px <= stop:
-        return float(open_px if open_px < stop else stop)
-    return np.nan
-
-
-def backtest_symbol_monthly(
-    df: pd.DataFrame,
-    params: dict | None = None,
+def _simulate_symbol_core(
+    x: pd.DataFrame,
+    p: dict,
+    *,
+    cash: float,
+    alloc_pct: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Single-symbol monthly backtest (next-bar open entries/exits; intrabar stop)."""
-    p = {**DEFAULT_PARAMS, **(params or {})}
-    x = build_trade_signals(compute_accumulation_frame(df, p), p)
-    if x.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    cash = float(p["initial_capital"])
-    equity = cash
-    pos_shares = 0.0
-    entry_px = stop_px = np.nan
     trades: list[dict] = []
     equity_rows: list[dict] = []
-
     n = len(x)
+    pos: _PositionBarState | None = None
+    pending_atr: float | None = None
+    trend_exit_pending = False
+    last_exit: int | None = None
+    cd = int(p["cooldown_bars"])
+    shares = 0.0
+    entry_dt = None
+
     for i in range(n):
         row = x.iloc[i]
-        opn, lo, cl = float(row["Open"]), float(row["Low"]), float(row["Close"])
+        opn, hi, lo, cl = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
         dt = row["Date"]
 
-        if pos_shares > 0:
-            hit = _exit_stop_price(opn, lo, stop_px)
+        if shares > 0 and trend_exit_pending and pos is not None:
+            cash += shares * opn
+            trades.append(
+                {
+                    "entry_date": entry_dt,
+                    "exit_date": dt,
+                    "entry_px": pos.entry_px,
+                    "exit_px": opn,
+                    "shares": shares,
+                    "pnl": shares * (opn - pos.entry_px),
+                    "reason": "larger_trend_reversal",
+                }
+            )
+            shares = 0.0
+            pos = None
+            last_exit = i
+            trend_exit_pending = False
+
+        if shares > 0 and pos is not None:
+            hit = _exit_stop_price(opn, lo, pos.active_stop)
             if np.isfinite(hit):
-                cash += pos_shares * hit
+                cash += shares * hit
                 trades.append(
                     {
                         "entry_date": entry_dt,
                         "exit_date": dt,
-                        "entry_px": entry_px,
+                        "entry_px": pos.entry_px,
                         "exit_px": hit,
-                        "shares": pos_shares,
-                        "pnl": pos_shares * (hit - entry_px),
-                        "reason": "stop_loss",
+                        "shares": shares,
+                        "pnl": shares * (hit - pos.entry_px),
+                        "reason": "protective_stop",
                     }
                 )
-                pos_shares = 0.0
-                entry_px = stop_px = np.nan
-            elif i > 0 and bool(x.iloc[i - 1]["sell_signal"]):
-                cash += pos_shares * opn
-                trades.append(
-                    {
-                        "entry_date": entry_dt,
-                        "exit_date": dt,
-                        "entry_px": entry_px,
-                        "exit_px": opn,
-                        "shares": pos_shares,
-                        "pnl": pos_shares * (opn - entry_px),
-                        "reason": "signal_exit",
-                    }
-                )
-                pos_shares = 0.0
-                entry_px = stop_px = np.nan
+                shares = 0.0
+                pos = None
+                last_exit = i
+            elif i > 0:
+                bars_held = i - pos.entry_bar
+                if _larger_trend_exit(x.iloc[i - 1], bars_held=bars_held, p=p):
+                    trend_exit_pending = True
 
-        if pos_shares == 0 and i > 0 and bool(x.iloc[i - 1]["buy_signal"]):
-            equity = cash
-            alloc = equity * float(p["position_pct"]) / 100.0
+        if shares == 0 and pending_atr is not None:
+            eq = cash
+            alloc = min(eq * alloc_pct / 100.0, cash)
             if alloc > 0 and opn > 0:
-                sh = alloc / opn
+                shares = alloc / opn
                 cash -= alloc
-                pos_shares = sh
-                entry_px = opn
+                entry_atr = pending_atr if np.isfinite(pending_atr) and pending_atr > 0 else float(row["atr"])
+                initial = _initial_stop_price(opn, entry_atr, p)
+                pos = _PositionBarState(
+                    entry_bar=i,
+                    entry_px=opn,
+                    entry_atr=entry_atr,
+                    initial_stop=initial,
+                    highest_since_entry=hi,
+                    profit_trail_stop=None,
+                    active_stop=initial,
+                )
                 entry_dt = dt
-                stop_px = entry_px * (1 - float(p["stop_loss_percent"]) / 100.0)
+            pending_atr = None
 
-        mtm = cash + pos_shares * cl if pos_shares > 0 else cash
+        cooled = last_exit is None or (i - last_exit) > cd
+        if shares == 0 and pending_atr is None and cooled and bool(row["entry_condition"]):
+            if i + 1 < n:
+                pending_atr = float(row["atr"]) if np.isfinite(row["atr"]) else np.nan
+
+        if pos is not None and shares > 0 and pos.entry_bar != i:
+            _update_profit_trail(pos, high=hi, atr=float(row["atr"]), p=p)
+
+        mtm = cash + shares * cl if shares > 0 else cash
         equity_rows.append({"Date": dt, "equity": mtm})
 
-    if pos_shares > 0:
+    if shares > 0 and pos is not None:
         cl = float(x.iloc[-1]["Close"])
-        cash += pos_shares * cl
+        cash += shares * cl
         trades.append(
             {
                 "entry_date": entry_dt,
                 "exit_date": x.iloc[-1]["Date"],
-                "entry_px": entry_px,
+                "entry_px": pos.entry_px,
                 "exit_px": cl,
-                "shares": pos_shares,
-                "pnl": pos_shares * (cl - entry_px),
+                "shares": shares,
+                "pnl": shares * (cl - pos.entry_px),
                 "reason": "end_of_data",
             }
         )
@@ -387,11 +532,32 @@ def backtest_symbol_monthly(
     return pd.DataFrame(trades), pd.DataFrame(equity_rows)
 
 
+def backtest_symbol_monthly(
+    df: pd.DataFrame,
+    params: dict | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    x = build_trade_signals(df, p)
+    if x.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    return _simulate_symbol_core(x, p, cash=float(p["initial_capital"]), alloc_pct=float(p["position_pct"]))
+
+
+@dataclass
+class _PortfolioPos:
+    shares: float
+    entry_px: float
+    entry_date: Any
+    entry_bar: int
+    state: _PositionBarState
+    trend_exit_pending: bool = False
+
+
 def backtest_portfolio_monthly(
     signals: pd.DataFrame,
     params: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Shared cash; 10% of equity per new long; one position per symbol; next-month open fills."""
+    """Shared cash; V4.7 stops/exits per symbol; next-month open fills."""
     p = {**DEFAULT_PARAMS, **(params or {})}
     if signals.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -403,12 +569,12 @@ def backtest_portfolio_monthly(
         return pd.DataFrame(), pd.DataFrame()
 
     by_date = {d: g for d, g in sig.groupby("Date", observed=True)}
-
-    cash = float(p["initial_capital"])
-    positions: dict[str, dict] = {}
-    last_exit_idx: dict[str, int] = {}
     month_index = {pd.Timestamp(m): i for i, m in enumerate(months)}
-    cd = int(p["cooldown_months"]) if p["use_cooldown"] else 0
+    cd = int(p["cooldown_bars"])
+    cash = float(p["initial_capital"])
+    positions: dict[str, _PortfolioPos] = {}
+    last_exit_idx: dict[str, int] = {}
+    pending_atr: dict[str, float] = {}
     trades: list[dict] = []
     equity_rows: list[dict] = []
 
@@ -419,94 +585,130 @@ def backtest_portfolio_monthly(
         if cur_panel.empty:
             continue
         cur = cur_panel.set_index("Symbol")
+        mii = month_index[pd.Timestamp(m)]
 
         for sym in list(positions):
             if sym not in cur.index:
                 continue
-            pos = positions[sym]
+            pp = positions[sym]
             row = cur.loc[sym]
-            opn, lo, cl = float(row["Open"]), float(row["Low"]), float(row["Close"])
-            stop = pos["stop"]
-            hit = _exit_stop_price(opn, lo, stop)
-            sell_prev = False
-            if not prev_panel.empty and sym in prev_panel["Symbol"].values:
-                sell_prev = bool(
-                    prev_panel.loc[prev_panel["Symbol"] == sym, "sell_signal"].iloc[0]
-                )
-            if np.isfinite(hit):
-                notional = pos["shares"] * hit
-                cash += notional
-                trades.append(
-                    {
-                        "Symbol": sym,
-                        "entry_date": pos["entry_date"],
-                        "exit_date": m,
-                        "entry_px": pos["entry_px"],
-                        "exit_px": hit,
-                        "shares": pos["shares"],
-                        "pnl": pos["shares"] * (hit - pos["entry_px"]),
-                        "reason": "stop_loss",
-                    }
-                )
-                del positions[sym]
-                last_exit_idx[sym] = month_index[pd.Timestamp(m)]
-            elif sell_prev:
-                notional = pos["shares"] * opn
-                cash += notional
-                trades.append(
-                    {
-                        "Symbol": sym,
-                        "entry_date": pos["entry_date"],
-                        "exit_date": m,
-                        "entry_px": pos["entry_px"],
-                        "exit_px": opn,
-                        "shares": pos["shares"],
-                        "pnl": pos["shares"] * (opn - pos["entry_px"]),
-                        "reason": "signal_exit",
-                    }
-                )
-                del positions[sym]
-                last_exit_idx[sym] = month_index[pd.Timestamp(m)]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            opn, hi, lo = float(row["Open"]), float(row["High"]), float(row["Low"])
 
-        eq = cash + sum(pos["shares"] * float(cur.loc[s, "Close"]) for s, pos in positions.items() if s in cur.index)
-        for _, row in prev_panel.iterrows():
-            sym = row["Symbol"]
-            if sym in positions:
+            if pp.trend_exit_pending:
+                cash += pp.shares * opn
+                trades.append(
+                    {
+                        "Symbol": sym,
+                        "entry_date": pp.entry_date,
+                        "exit_date": m,
+                        "entry_px": pp.entry_px,
+                        "exit_px": opn,
+                        "shares": pp.shares,
+                        "pnl": pp.shares * (opn - pp.entry_px),
+                        "reason": "larger_trend_reversal",
+                    }
+                )
+                del positions[sym]
+                last_exit_idx[sym] = mii
                 continue
-            if not bool(row["buy_signal"]):
+
+            hit = _exit_stop_price(opn, lo, pp.state.active_stop)
+            if np.isfinite(hit):
+                cash += pp.shares * hit
+                trades.append(
+                    {
+                        "Symbol": sym,
+                        "entry_date": pp.entry_date,
+                        "exit_date": m,
+                        "entry_px": pp.entry_px,
+                        "exit_px": hit,
+                        "shares": pp.shares,
+                        "pnl": pp.shares * (hit - pp.entry_px),
+                        "reason": "protective_stop",
+                    }
+                )
+                del positions[sym]
+                last_exit_idx[sym] = mii
+            elif not prev_panel.empty and sym in prev_panel["Symbol"].values:
+                prev_row = prev_panel.loc[prev_panel["Symbol"] == sym].iloc[0]
+                bars_held = mii - pp.state.entry_bar
+                if _larger_trend_exit(prev_row, bars_held=bars_held, p=p):
+                    pp.trend_exit_pending = True
+
+        for sym, patr in list(pending_atr.items()):
+            if sym in positions or sym not in cur.index:
                 continue
-            if sym not in cur.index:
-                continue
-            li = last_exit_idx.get(sym)
-            mii = month_index[pd.Timestamp(m)]
-            if p["use_cooldown"] and li is not None and (mii - li) < cd:
-                continue
-            opn = float(cur.loc[sym, "Open"])
-            if opn <= 0 or not np.isfinite(opn):
-                continue
-            alloc = eq * float(p["position_pct"]) / 100.0
-            alloc = min(alloc, cash)
-            if alloc < opn:
+            row = cur.loc[sym]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            opn, hi = float(row["Open"]), float(row["High"])
+            mtm = cash
+            for s, ps in positions.items():
+                if s in cur.index:
+                    cr = cur.loc[s]
+                    if isinstance(cr, pd.DataFrame):
+                        cr = cr.iloc[0]
+                    mtm += ps.shares * float(cr["Close"])
+            alloc = min(mtm * float(p["position_pct"]) / 100.0, cash)
+            if alloc <= 0 or opn <= 0:
+                del pending_atr[sym]
                 continue
             sh = alloc / opn
             cash -= alloc
-            positions[sym] = {
-                "shares": sh,
-                "entry_px": opn,
-                "entry_date": m,
-                "stop": opn * (1 - float(p["stop_loss_percent"]) / 100.0),
-            }
+            atr = patr if np.isfinite(patr) and patr > 0 else float(row["atr"])
+            initial = _initial_stop_price(opn, atr, p)
+            positions[sym] = _PortfolioPos(
+                shares=sh,
+                entry_px=opn,
+                entry_date=m,
+                entry_bar=mii,
+                state=_PositionBarState(
+                    entry_bar=mii,
+                    entry_px=opn,
+                    entry_atr=atr,
+                    initial_stop=initial,
+                    highest_since_entry=hi,
+                    profit_trail_stop=None,
+                    active_stop=initial,
+                ),
+            )
+            del pending_atr[sym]
 
-        mtm = cash + sum(
-            pos["shares"] * float(cur.loc[sym, "Close"])
-            for sym, pos in positions.items()
-            if sym in cur.index
-        )
+        if not prev_panel.empty:
+            for _, prow in prev_panel.iterrows():
+                sym = prow["Symbol"]
+                if sym in positions or sym in pending_atr:
+                    continue
+                if not bool(prow.get("buy_signal", False)):
+                    continue
+                li = last_exit_idx.get(sym)
+                if li is not None and (mii - li) <= cd:
+                    continue
+                if sym not in cur.index:
+                    continue
+                pending_atr[sym] = float(prow["atr"]) if np.isfinite(prow.get("atr", np.nan)) else np.nan
+
+        for sym, pp in positions.items():
+            if sym not in cur.index:
+                continue
+            row = cur.loc[sym]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            if pp.state.entry_bar != mii:
+                _update_profit_trail(pp.state, high=float(row["High"]), atr=float(row["atr"]), p=p)
+
+        mtm = cash
+        for sym, pp in positions.items():
+            if sym in cur.index:
+                cr = cur.loc[sym]
+                if isinstance(cr, pd.DataFrame):
+                    cr = cr.iloc[0]
+                mtm += pp.shares * float(cr["Close"])
         equity_rows.append({"Date": m, "equity": mtm})
 
-    trade_df = pd.DataFrame(trades)
-    eq_df = pd.DataFrame(equity_rows)
-    return trade_df, eq_df
+    return pd.DataFrame(trades), pd.DataFrame(equity_rows)
 
 
 def summarize_backtest(
@@ -555,7 +757,11 @@ def load_daily_ohlcv_panel(
 
     from quant.config import DATA_DIR
 
-    path = Path(panel_path) if panel_path else DATA_DIR / "results" / "explosive_moves" / "panel" / "ohlcv_panel.parquet"
+    path = (
+        Path(panel_path)
+        if panel_path
+        else DATA_DIR / "results" / "explosive_moves" / "panel" / "ohlcv_panel.parquet"
+    )
     if not path.exists():
         raise FileNotFoundError(
             f"Missing panel {path}. Build it via strategies/explosive_moves_research.ipynb Phase 2."

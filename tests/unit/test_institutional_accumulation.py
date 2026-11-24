@@ -77,11 +77,10 @@ def test_backtest_returns_summary():
     assert len(eq) == len(m)
 
 
-def test_stop_loss_triggers():
-    m = _synthetic_monthly(30)
-    m.loc[m.index[-5:], "Low"] = m["Close"] * 0.5
-    sig = build_trade_signals(compute_accumulation_frame(m))
-    trades, _ = backtest_symbol_monthly(m)
-    if not trades.empty:
-        assert "stop_loss" in trades["reason"].values or len(trades) >= 0
+def test_entry_condition_columns():
+    m = _synthetic_monthly(60)
+    out = compute_accumulation_frame(m)
+    assert "entry_condition" in out.columns
+    assert "adx" in out.columns
+    assert out["accumulation_score"].between(0, 5).all()
 

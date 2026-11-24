@@ -36,6 +36,25 @@ CSV_LATEST = OUTPUT_DIR / "stocks_100pct_1y_latest.csv"
 CSV_EVER_BEST = OUTPUT_DIR / "stocks_100pct_1y_ever_best.csv"
 
 
+def min_return_from_pct(min_return_pct: float) -> float:
+    """Convert UI percent (100 = +100%) to decimal excess return (1.0 = +100%)."""
+    return float(min_return_pct) / 100.0
+
+
+def screen_output_paths(
+    min_return: float,
+    min_price: float | None,
+) -> tuple[Path, Path]:
+    """CSV paths tagged with return and min-price thresholds."""
+    tag = f"ret{int(round(min_return * 100))}pct"
+    if min_price is not None:
+        px = int(min_price) if float(min_price).is_integer() else min_price
+        tag += f"_minpx{px}"
+    latest = OUTPUT_DIR / f"stocks_1y_{tag}_latest.csv"
+    ever = OUTPUT_DIR / f"stocks_1y_{tag}_ever_best.csv"
+    return latest, ever
+
+
 def load_panel() -> pd.DataFrame:
     panel_path = DATA_DIR / "results" / "explosive_moves" / "panel" / "ohlcv_panel.parquet"
     if panel_path.exists():
@@ -201,6 +220,7 @@ def diagnose_screen_at(
     *,
     as_of: pd.Timestamp | None = None,
     min_return: float = MIN_RETURN,
+    min_price: float | None = MIN_PRICE,
     eq_only: bool = EQ_ONLY,
     min_window_days: int = MIN_WINDOW_DAYS,
     max_window_days: int = MAX_WINDOW_DAYS,
@@ -213,9 +233,11 @@ def diagnose_screen_at(
         snap, min_window_days=min_window_days, max_window_days=max_window_days
     )
     ret_ok = snap["ret_1y"].gt(min_return)
+    px_ok = snap["end_price"] >= min_price if min_price is not None else pd.Series(True, index=snap.index)
     rows = [
         ("symbols_on_as_of", snap["Symbol"].nunique()),
         (f"ret_1y > {min_return}", int(ret_ok.sum())),
+        (f"end_price >= {min_price}" if min_price is not None else "min_price off", int(px_ok.sum())),
         (
             f"window_days in [{min_window_days},{max_window_days}]",
             int((snap["window_days"].between(min_window_days, max_window_days)).sum()),
@@ -225,7 +247,7 @@ def diagnose_screen_at(
             int((snap["start_lag_days"].between(0, MAX_START_LAG_DAYS)).sum()),
         ),
         ("valid_window_all_rules", int(ok_win.sum())),
-        ("winners (valid & ret)", int((ok_win & ret_ok).sum())),
+        ("winners (valid & ret & price)", int((ok_win & ret_ok & px_ok).sum())),
     ]
     return pd.DataFrame(rows, columns=["check", "count"])
 
@@ -275,6 +297,7 @@ def symbols_ever_100pct_in_rolling_year(
     panel: pd.DataFrame,
     *,
     min_return: float = MIN_RETURN,
+    min_price: float | None = MIN_PRICE,
     eq_only: bool = EQ_ONLY,
     min_window_days: int = MIN_WINDOW_DAYS,
     max_window_days: int = MAX_WINDOW_DAYS,
@@ -286,7 +309,13 @@ def symbols_ever_100pct_in_rolling_year(
     ok = _valid_window_mask(
         x, min_window_days=min_window_days, max_window_days=max_window_days
     )
-    hits = x.loc[ok & x["ret_1y"].gt(min_return), ["Symbol", "start_date", "start_price", "end_date", "end_price", "ret_1y", "window_days"]]
+    hit_mask = ok & x["ret_1y"].gt(min_return)
+    if min_price is not None:
+        hit_mask &= x["end_price"] >= min_price
+    hits = x.loc[
+        hit_mask,
+        ["Symbol", "start_date", "start_price", "end_date", "end_price", "ret_1y", "window_days"],
+    ]
 
     best = (
         hits.sort_values("ret_1y", ascending=False)
@@ -299,10 +328,21 @@ def symbols_ever_100pct_in_rolling_year(
     return best.sort_values("max_ret_1y", ascending=False).reset_index(drop=True)
 
 
-def export_csv(winners: pd.DataFrame, ever: pd.DataFrame) -> None:
+def export_csv(
+    winners: pd.DataFrame,
+    ever: pd.DataFrame,
+    *,
+    min_return: float = MIN_RETURN,
+    min_price: float | None = MIN_PRICE,
+    latest_path: Path | None = None,
+    ever_path: Path | None = None,
+) -> tuple[Path, Path]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    winners.to_csv(CSV_LATEST, index=False)
-    ever.to_csv(CSV_EVER_BEST, index=False)
+    if latest_path is None or ever_path is None:
+        latest_path, ever_path = screen_output_paths(min_return, min_price)
+    winners.to_csv(latest_path, index=False)
+    ever.to_csv(ever_path, index=False)
+    return latest_path, ever_path
 
 
 def main() -> None:
@@ -337,8 +377,8 @@ def main() -> None:
     if len(ever):
         print(ever.head(30).to_string(index=False))
 
-    export_csv(winners, ever)
-    print(f"\nWrote:\n  {CSV_LATEST}\n  {CSV_EVER_BEST}")
+    latest_p, ever_p = export_csv(winners, ever, min_return=MIN_RETURN, min_price=MIN_PRICE)
+    print(f"\nWrote:\n  {latest_p}\n  {ever_p}")
 
 
 if __name__ == "__main__":

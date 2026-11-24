@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-INST_ACC_ENGINE_VERSION = "4.8"
+INST_ACC_ENGINE_VERSION = "4.9"
 STRATEGY_LABEL = "Institutional Accumulation - Balanced V4.7"
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -57,7 +57,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
 DEFAULT_SYMBOL_CONTINUITY: dict[str, Any] = {
     "enabled": True,
     "min_coverage_ratio": 0.95,
-    "max_internal_gap_sessions": 20,
+    # explosive filter uses max_gap > N; N=4 drops symbols with any 5+ session hole
+    "max_internal_gap_sessions": 4,
 }
 
 

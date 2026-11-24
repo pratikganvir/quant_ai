@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-INST_ACC_ENGINE_VERSION = "4.7"
+INST_ACC_ENGINE_VERSION = "4.8"
 STRATEGY_LABEL = "Institutional Accumulation - Balanced V4.7"
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -49,12 +49,59 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "min_monthly_bars": 36,
     "min_price": 5.0,
     "eq_only": True,
+    # Data quality (gaps)
+    "max_missing_monthly_bars": 2,
+    "max_monthly_gap_months": 2,
+}
+
+DEFAULT_SYMBOL_CONTINUITY: dict[str, Any] = {
+    "enabled": True,
+    "min_coverage_ratio": 0.95,
+    "max_internal_gap_sessions": 20,
 }
 
 
 def strategy_params_fingerprint(params: dict | None = None) -> dict[str, Any]:
     p = {**DEFAULT_PARAMS, **(params or {})}
     return {k: p[k] for k in sorted(DEFAULT_PARAMS)}
+
+
+def filter_daily_panel_continuity(
+    panel: pd.DataFrame,
+    continuity_cfg: dict | None,
+    nifty_df: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop symbols with patchy daily session coverage (explosive research parity)."""
+    from quant.research.explosive_research import apply_symbol_continuity_filter
+
+    cfg = {"symbol_continuity": {**DEFAULT_SYMBOL_CONTINUITY, **(continuity_cfg or {})}}
+    return apply_symbol_continuity_filter(panel, nifty_df, cfg)
+
+
+def symbols_with_large_monthly_gaps(monthly: pd.DataFrame, max_gap_months: int) -> set[str]:
+    """Symbols whose month-end series skips more than ``max_gap_months`` between bars."""
+    if max_gap_months < 1:
+        return set()
+    bad: set[str] = set()
+    for sym, g in monthly.groupby("Symbol", observed=True):
+        d = pd.to_datetime(g["Date"], errors="coerce").dropna().sort_values()
+        if len(d) < 2:
+            continue
+        ym = d.dt.year.astype(np.int64) * 12 + d.dt.month.astype(np.int64)
+        skip = ym.diff().dropna() - 1
+        if (skip > max_gap_months).any():
+            bad.add(str(sym))
+    return bad
+
+
+def filter_monthly_panel_gaps(monthly: pd.DataFrame, max_gap_months: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Remove symbols with large calendar-month holes in the monthly panel."""
+    bad = symbols_with_large_monthly_gaps(monthly, max_gap_months)
+    if not bad:
+        return monthly, pd.DataFrame(columns=["Symbol", "reason"])
+    kept = monthly.loc[~monthly["Symbol"].astype(str).isin(bad)].copy()
+    excluded = pd.DataFrame({"Symbol": sorted(bad), "reason": "monthly_gap"})
+    return kept, excluded
 
 
 def resample_symbol_to_monthly(g: pd.DataFrame) -> pd.DataFrame:
@@ -387,12 +434,15 @@ def compute_signals_monthly(
         tqdm = None  # type: ignore
 
     p = {**DEFAULT_PARAMS, **(params or {})}
+    gap_drop = symbols_with_large_monthly_gaps(monthly, int(p["max_monthly_gap_months"]))
     parts: list[pd.DataFrame] = []
     groups = list(monthly.groupby("Symbol", observed=True))
     sym_iter: Any = groups
     if tqdm is not None and show_progress:
         sym_iter = tqdm(groups, desc="V4.7 signals", unit="symbol")
     for sym, g in sym_iter:
+        if str(sym) in gap_drop:
+            continue
         g = _normalize_ohlcv_frame(g)
         if len(g) < int(p["min_monthly_bars"]):
             continue
@@ -551,6 +601,8 @@ class _PortfolioPos:
     entry_bar: int
     state: _PositionBarState
     trend_exit_pending: bool = False
+    missing_months: int = 0
+    last_close: float = float("nan")
 
 
 def backtest_portfolio_monthly(
@@ -577,6 +629,7 @@ def backtest_portfolio_monthly(
     pending_atr: dict[str, float] = {}
     trades: list[dict] = []
     equity_rows: list[dict] = []
+    max_missing = int(p["max_missing_monthly_bars"])
 
     for mi in range(1, len(months)):
         m_prev, m = months[mi - 1], months[mi]
@@ -588,13 +641,39 @@ def backtest_portfolio_monthly(
         mii = month_index[pd.Timestamp(m)]
 
         for sym in list(positions):
-            if sym not in cur.index:
-                continue
             pp = positions[sym]
+            if sym not in cur.index:
+                pp.missing_months += 1
+                if pp.missing_months > max_missing and np.isfinite(pp.last_close) and pp.last_close > 0:
+                    px = pp.last_close
+                    cash += pp.shares * px
+                    trades.append(
+                        {
+                            "Symbol": sym,
+                            "entry_date": pp.entry_date,
+                            "exit_date": m,
+                            "entry_px": pp.entry_px,
+                            "exit_px": px,
+                            "shares": pp.shares,
+                            "pnl": pp.shares * (px - pp.entry_px),
+                            "reason": "missing_monthly_bar",
+                        }
+                    )
+                    del positions[sym]
+                    last_exit_idx[sym] = mii
+                continue
+
+            pp.missing_months = 0
             row = cur.loc[sym]
             if isinstance(row, pd.DataFrame):
                 row = row.iloc[0]
-            opn, hi, lo = float(row["Open"]), float(row["High"]), float(row["Low"])
+            opn, hi, lo, cl = (
+                float(row["Open"]),
+                float(row["High"]),
+                float(row["Low"]),
+                float(row["Close"]),
+            )
+            pp.last_close = cl
 
             if pp.trend_exit_pending:
                 cash += pp.shares * opn
@@ -673,6 +752,7 @@ def backtest_portfolio_monthly(
                     profit_trail_stop=None,
                     active_stop=initial,
                 ),
+                last_close=float(row["Close"]),
             )
             del pending_atr[sym]
 
@@ -706,6 +786,8 @@ def backtest_portfolio_monthly(
                 if isinstance(cr, pd.DataFrame):
                     cr = cr.iloc[0]
                 mtm += pp.shares * float(cr["Close"])
+            elif np.isfinite(pp.last_close) and pp.last_close > 0:
+                mtm += pp.shares * pp.last_close
         equity_rows.append({"Date": m, "equity": mtm})
 
     return pd.DataFrame(trades), pd.DataFrame(equity_rows)

@@ -12,6 +12,7 @@ from quant.research.institutional_accumulation import (
     backtest_symbol_monthly,
     build_trade_signals,
     summarize_backtest,
+    symbols_with_large_monthly_gaps,
 )
 
 
@@ -75,6 +76,23 @@ def test_backtest_returns_summary():
     summary = summarize_backtest(trades, eq)
     assert summary.initial_capital == 100_000
     assert len(eq) == len(m)
+
+
+def test_monthly_gap_symbol_detection():
+    dates = pd.to_datetime(["2020-01-31", "2020-02-29", "2020-06-30"])
+    monthly = pd.DataFrame(
+        {
+            "Date": dates,
+            "Symbol": ["GAP"] * 3,
+            "Open": 1.0,
+            "High": 1.0,
+            "Low": 1.0,
+            "Close": 1.0,
+            "Volume": 1.0,
+        }
+    )
+    bad = symbols_with_large_monthly_gaps(monthly, max_gap_months=2)
+    assert "GAP" in bad
 
 
 def test_entry_condition_columns():

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from datetime import date
+from pathlib import Path
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -884,6 +886,36 @@ def backtest_universe_monthly(
     return all_trades, stats
 
 
+def symbol_monthly_debug_frame(
+    monthly: pd.DataFrame,
+    params: dict | None = None,
+) -> pd.DataFrame:
+    """Monthly OHLC + every entry/exit input (compare to TradingView data window)."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    x = build_trade_signals(monthly, p)
+    flag_cols = [
+        "Date",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "accumulation_score",
+        "relative_volume",
+        "up_volume_ratio",
+        "adx",
+        "efficiency_ratio",
+        "ema_slope_pct",
+        "entry_condition",
+        "buy_signal",
+        "sell_signal",
+        "confirmed_medium_breakdown",
+        "larger_trend_bearish",
+        "atr",
+    ]
+    return x[[c for c in flag_cols if c in x.columns]]
+
+
 def summarize_universe(stats: pd.DataFrame) -> dict[str, Any]:
     """Aggregate 'does it work?' metrics over per-symbol backtests."""
     if stats.empty:
@@ -921,26 +953,137 @@ def summarize_universe(stats: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def build_daily_ohlcv_panel_from_nse_cm(
+    *,
+    date_start: str | None = None,
+    date_end: str | None = None,
+    eq_only: bool = True,
+    parquet_root: Path | None = None,
+    show_progress: bool = True,
+) -> pd.DataFrame:
+    """Stack local ``nse_cm_*.parquet`` files into a long OHLCV panel (no API)."""
+    from quant.config import PARQUET_DATA_DIR
+    from quant.data.tejhq import indexed_parquet_dates, nse_cm_parquet_path, parquet_candidate_paths
+
+    root = parquet_root or PARQUET_DATA_DIR
+    have = sorted(indexed_parquet_dates(root))
+    start_d = pd.Timestamp(date_start).date() if date_start else None
+    end_d = pd.Timestamp(date_end).date() if date_end else None
+    if start_d:
+        have = [d for d in have if d >= start_d]
+    if end_d:
+        have = [d for d in have if d <= end_d]
+    if not have:
+        raise FileNotFoundError(f"No nse_cm parquets under {root} for requested range.")
+
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:  # pragma: no cover
+        tqdm = None  # type: ignore
+
+    day_iter: Iterable[date] = have
+    if show_progress and tqdm is not None:
+        day_iter = tqdm(have, desc="Load nse_cm parquets", unit="day")
+
+    parts: list[pd.DataFrame] = []
+    for day in day_iter:
+        path = next((p for p in parquet_candidate_paths(root, day) if p.is_file()), None)
+        if path is None:
+            continue
+        df = pd.read_parquet(path)
+        if df.empty:
+            continue
+        df = df.rename(
+            columns={
+                "date": "Date",
+                "symbol": "Symbol",
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+                "series": "Series",
+            }
+        )
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+        if "Symbol" in df.columns:
+            df["Symbol"] = df["Symbol"].astype(str).str.upper().str.strip()
+        if eq_only and "Series" in df.columns:
+            df = df.loc[df["Series"].astype(str).str.upper().str.strip() == "EQ"]
+        parts.append(df)
+
+    if not parts:
+        raise FileNotFoundError(f"No rows loaded from nse_cm parquets under {root}.")
+    out = pd.concat(parts, ignore_index=True)
+    out = out.loc[:, ~pd.Index(out.columns).duplicated(keep="first")]
+    return out.sort_values(["Symbol", "Date"]).reset_index(drop=True)
+
+
+def ensure_upstox_daily_for_monthly(
+    *,
+    date_start: str,
+    date_end: str | None = None,
+    symbols: Sequence[str] | None = None,
+    max_symbols: int | None = None,
+    refresh_cache: bool = False,
+    dry_run: bool = False,
+    show_progress: bool = True,
+) -> dict[str, Any]:
+    """Fetch only missing Upstox daily history and materialize absent ``nse_cm_*`` days."""
+    from datetime import date as date_cls
+
+    from quant.config import PARQUET_DATA_DIR
+    from quant.data.upstox import sync_upstox_for_monthly_backtest
+
+    start_d = pd.Timestamp(date_start).date()
+    end_d = pd.Timestamp(date_end).date() if date_end else date_cls.today()
+    return sync_upstox_for_monthly_backtest(
+        PARQUET_DATA_DIR,
+        date_start=start_d,
+        date_end=end_d,
+        symbols=symbols,
+        max_symbols=max_symbols,
+        refresh_cache=refresh_cache,
+        dry_run=dry_run,
+        show_progress=show_progress,
+    )
+
+
 def load_daily_ohlcv_panel(
     panel_path: str | None = None,
     *,
     date_start: str | None = None,
     date_end: str | None = None,
     eq_only: bool = True,
+    from_nse_cm: bool = False,
+    parquet_root: Path | None = None,
 ) -> pd.DataFrame:
     from pathlib import Path
 
     from quant.config import DATA_DIR
 
-    path = (
-        Path(panel_path)
-        if panel_path
-        else DATA_DIR / "results" / "explosive_moves" / "panel" / "ohlcv_panel.parquet"
-    )
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Missing panel {path}. Build it via strategies/explosive_moves_research.ipynb Phase 2."
+    path = Path(panel_path) if panel_path else None
+    if from_nse_cm:
+        return build_daily_ohlcv_panel_from_nse_cm(
+            date_start=date_start,
+            date_end=date_end,
+            eq_only=eq_only,
+            parquet_root=parquet_root,
         )
+    if path is None:
+        path = DATA_DIR / "results" / "explosive_moves" / "panel" / "ohlcv_panel.parquet"
+    if not path.exists():
+        try:
+            return build_daily_ohlcv_panel_from_nse_cm(
+                date_start=date_start,
+                date_end=date_end,
+                eq_only=eq_only,
+                parquet_root=parquet_root,
+            )
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Missing panel {path}. Run Phase 0 Upstox sync or build via explosive_moves Phase 2."
+            ) from None
     cols = ["Date", "Symbol", "Open", "High", "Low", "Close", "Volume", "Series"]
     import pyarrow.parquet as pq
 

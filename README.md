@@ -55,6 +55,17 @@ PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --materialize-only --star
 
 Upstox daily candles return at most **~1 year per API call**; the client walks year-sized chunks and merges locally.
 
+**Rate limits** (standard APIs): 50/s, 500/min, **2000/30min**. The client enforces conservative defaults (~8/s, 90/min, 1800/30min) plus **429 retries** with `Retry-After`. Tune in `.env` if needed:
+
+```bash
+UPSTOX_RATE_PER_SECOND=8
+UPSTOX_RATE_PER_MINUTE=90
+UPSTOX_RATE_PER_30MIN=1800
+UPSTOX_MIN_INTERVAL_S=1.0
+```
+
+Large first-time universe syncs can take multiple sessions; cached gzip chunks are not re-fetched.
+
 Set `QUANT_DATA_SYNC_SOURCE=tejhq` if you still want TejHQ scripts by default on the VM.
 
 ### TejHQ (optional source)

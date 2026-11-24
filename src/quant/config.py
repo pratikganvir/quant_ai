@@ -59,6 +59,14 @@ UPSTOX_CACHE_DIR = Path(
 
 UPSTOX_SYMBOL_MANIFEST_PATH = METADATA_DIR / "upstox_symbol_manifest.csv"
 
+# Upstox standard API limits (historical candles): 50/s, 500/min, 2000/30min — stay below via defaults.
+# Override in .env for faster sync if you have headroom (still cache-first).
+UPSTOX_RATE_PER_SECOND = int(os.getenv("UPSTOX_RATE_PER_SECOND", "8"))
+UPSTOX_RATE_PER_MINUTE = int(os.getenv("UPSTOX_RATE_PER_MINUTE", "90"))
+UPSTOX_RATE_PER_30MIN = int(os.getenv("UPSTOX_RATE_PER_30MIN", "1800"))
+UPSTOX_MIN_INTERVAL_S = float(os.getenv("UPSTOX_MIN_INTERVAL_S", "1.0"))
+UPSTOX_HTTP_MAX_ATTEMPTS = int(os.getenv("UPSTOX_HTTP_MAX_ATTEMPTS", "6"))
+
 # Preferred daily sync: upstox | tejhq (scripts only; both write nse_cm_*.parquet)
 DATA_SYNC_SOURCE = os.getenv("QUANT_DATA_SYNC_SOURCE", "upstox").lower()
 

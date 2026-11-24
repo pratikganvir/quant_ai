@@ -265,15 +265,109 @@ def prepare_rf_sample(
     return X_out, y_out, diag
 
 
+def trades_export_frame(
+    dataset: pd.DataFrame,
+    *,
+    forward_sessions: int,
+    label_col: str,
+    feature_cols: list[str] | None = None,
+    include_features: bool = True,
+) -> pd.DataFrame:
+    """One row per entry session: buy at entry close, mark at forward session exit."""
+    ret_col = f"fwd_ret_{forward_sessions}"
+    ok_col = f"horizon_ok_{forward_sessions}"
+    base_cols = [
+        "Symbol",
+        "Date",
+        "Close",
+        "exit_date",
+        "exit_close",
+        ret_col,
+        ok_col,
+        label_col,
+    ]
+    missing = [c for c in base_cols if c not in dataset.columns]
+    if missing:
+        raise KeyError(f"Missing columns for trade export: {missing}")
+
+    out = dataset[base_cols].copy()
+    out = out.rename(
+        columns={
+            "Date": "entry_date",
+            "Close": "entry_price",
+            "exit_close": "exit_price",
+            ret_col: "fwd_ret",
+            ok_col: "horizon_complete",
+            label_col: "hit",
+        }
+    )
+    out["fwd_ret_pct"] = (out["fwd_ret"] * 100).round(4)
+    out["hit"] = out["hit"].astype(int)
+    out["outcome"] = out["hit"].map({1: "hit", 0: "miss"})
+
+    if include_features:
+        feats = feature_cols or [c for c in FEATURE_COLS if c in dataset.columns]
+        for c in feats:
+            if c not in out.columns and c in dataset.columns:
+                out[c] = dataset[c].values
+
+    front = [
+        "Symbol",
+        "entry_date",
+        "entry_price",
+        "exit_date",
+        "exit_price",
+        "fwd_ret",
+        "fwd_ret_pct",
+        "hit",
+        "outcome",
+        "horizon_complete",
+    ]
+    rest = [c for c in out.columns if c not in front]
+    return out[front + rest].sort_values(["entry_date", "Symbol"]).reset_index(drop=True)
+
+
+def export_trades_csv(
+    dataset: pd.DataFrame,
+    *,
+    tag: str,
+    forward_sessions: int,
+    label_col: str,
+    include_features: bool = True,
+) -> Path:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    trades = trades_export_frame(
+        dataset,
+        forward_sessions=forward_sessions,
+        label_col=label_col,
+        include_features=include_features,
+    )
+    path = OUTPUT_DIR / f"trades_all_{tag}.csv"
+    trades.to_csv(path, index=False)
+    return path
+
+
 def export_results(
     dataset: pd.DataFrame,
     rank: pd.DataFrame,
     *,
     tag: str,
-) -> tuple[Path, Path]:
+    forward_sessions: int = FORWARD_SESSIONS,
+    label_col: str | None = None,
+    export_trades: bool = True,
+) -> tuple[Path, Path, Path | None]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ds_path = OUTPUT_DIR / f"dataset_{tag}.parquet"
     rank_path = OUTPUT_DIR / f"feature_rank_{tag}.csv"
     dataset.to_parquet(ds_path, index=False)
     rank.to_csv(rank_path, index=False)
-    return ds_path, rank_path
+    trades_path = None
+    if export_trades:
+        label_col = label_col or f"y_hit_{forward_sessions}d"
+        trades_path = export_trades_csv(
+            dataset,
+            tag=tag,
+            forward_sessions=forward_sessions,
+            label_col=label_col,
+        )
+    return ds_path, rank_path, trades_path

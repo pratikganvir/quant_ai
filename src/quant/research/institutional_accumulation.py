@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-INST_ACC_ENGINE_VERSION = "4.9"
+INST_ACC_ENGINE_VERSION = "5.0"
 STRATEGY_LABEL = "Institutional Accumulation - Balanced V4.7"
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -827,6 +827,98 @@ def summarize_backtest(
         win_rate_pct=win_rate,
         profitable=final > ic,
     )
+
+
+def backtest_universe_monthly(
+    monthly: pd.DataFrame,
+    params: dict | None = None,
+    *,
+    show_progress: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    TradingView-style: one independent backtest per valid symbol (100% equity each).
+    """
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:  # pragma: no cover
+        tqdm = None  # type: ignore
+
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    gap_drop = symbols_with_large_monthly_gaps(monthly, int(p["max_monthly_gap_months"]))
+    groups = list(monthly.groupby("Symbol", observed=True))
+    sym_iter: Any = groups
+    if tqdm is not None and show_progress:
+        sym_iter = tqdm(groups, desc="Per-symbol backtest", unit="symbol")
+
+    ic = float(p["initial_capital"])
+    stat_rows: list[dict] = []
+    trade_parts: list[pd.DataFrame] = []
+
+    for sym, g in sym_iter:
+        sym_s = str(sym)
+        if sym_s in gap_drop:
+            continue
+        g = _normalize_ohlcv_frame(g)
+        if len(g) < int(p["min_monthly_bars"]):
+            continue
+        last_close = float(g["Close"].iloc[-1])
+        if not np.isfinite(last_close) or last_close < float(p["min_price"]):
+            continue
+        trades, equity = backtest_symbol_monthly(g, p)
+        summary = summarize_backtest(trades, equity, ic)
+        stat_rows.append(
+            {
+                "Symbol": sym_s,
+                "n_monthly_bars": len(g),
+                "had_trades": len(trades) > 0,
+                **{k: getattr(summary, k) for k in summary.__dataclass_fields__},
+            }
+        )
+        if not trades.empty:
+            t = trades.copy()
+            t["Symbol"] = sym_s
+            trade_parts.append(t)
+
+    stats = pd.DataFrame(stat_rows)
+    all_trades = pd.concat(trade_parts, ignore_index=True) if trade_parts else pd.DataFrame()
+    return all_trades, stats
+
+
+def summarize_universe(stats: pd.DataFrame) -> dict[str, Any]:
+    """Aggregate 'does it work?' metrics over per-symbol backtests."""
+    if stats.empty:
+        return {
+            "n_symbols_tested": 0,
+            "n_with_trades": 0,
+            "pct_profitable_with_trades": 0.0,
+            "pct_profitable_all_tested": 0.0,
+            "median_total_return_pct": 0.0,
+            "median_cagr_pct": 0.0,
+            "majority_profitable_among_traders": False,
+        }
+    traded = stats.loc[stats["had_trades"]]
+    pct_traded = 0.0
+    if len(traded) > 0:
+        pct_traded = float(traded["profitable"].mean() * 100)
+    return {
+        "n_symbols_tested": int(len(stats)),
+        "n_with_trades": int(len(traded)),
+        "n_without_trades": int(len(stats) - len(traded)),
+        "pct_profitable_with_trades": round(pct_traded, 2),
+        "pct_profitable_all_tested": round(float(stats["profitable"].mean() * 100), 2),
+        "median_total_return_pct": round(float(traded["total_return_pct"].median()), 2)
+        if len(traded)
+        else 0.0,
+        "median_cagr_pct": round(float(traded["cagr_pct"].median()), 2) if len(traded) else 0.0,
+        "mean_total_return_pct": round(float(traded["total_return_pct"].mean()), 2)
+        if len(traded)
+        else 0.0,
+        "median_max_drawdown_pct": round(float(traded["max_drawdown_pct"].median()), 2)
+        if len(traded)
+        else 0.0,
+        "median_n_trades": round(float(traded["n_trades"].median()), 1) if len(traded) else 0.0,
+        "majority_profitable_among_traders": bool(len(traded) > 0 and traded["profitable"].mean() > 0.5),
+    }
 
 
 def load_daily_ohlcv_panel(

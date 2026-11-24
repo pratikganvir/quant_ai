@@ -10,8 +10,10 @@ from quant.research.institutional_accumulation import (
     compute_accumulation_frame,
     resample_symbol_to_monthly,
     backtest_symbol_monthly,
+    backtest_universe_monthly,
     build_trade_signals,
     summarize_backtest,
+    summarize_universe,
     symbols_with_large_monthly_gaps,
 )
 
@@ -93,6 +95,19 @@ def test_monthly_gap_symbol_detection():
     )
     bad = symbols_with_large_monthly_gaps(monthly, max_gap_months=2)
     assert "GAP" in bad
+
+
+def test_universe_backtest_runs():
+    m1 = _synthetic_monthly(48, drift=0.02)
+    m1["Symbol"] = "A"
+    m2 = _synthetic_monthly(48, drift=-0.02)
+    m2["Symbol"] = "B"
+    monthly = pd.concat([m1, m2], ignore_index=True)
+    trades, stats = backtest_universe_monthly(monthly, show_progress=False)
+    assert len(stats) == 2
+    assert "Symbol" in stats.columns
+    uni = summarize_universe(stats)
+    assert uni["n_symbols_tested"] == 2
 
 
 def test_entry_condition_columns():

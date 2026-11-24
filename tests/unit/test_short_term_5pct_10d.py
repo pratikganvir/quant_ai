@@ -6,6 +6,7 @@ from quant.research.explosive_research import trading_calendar_from_panel
 from scripts.short_term_5pct_10d_research import (
     attach_forward_labels,
     prepare_rf_sample,
+    sample_rows_for_export,
     trades_export_frame,
 )
 
@@ -70,3 +71,15 @@ def test_trades_export_frame():
     ]
     assert len(out) == 2
     assert out.loc[0, "outcome"] == "hit"
+
+
+def test_sample_rows_for_export_cap():
+    df = pd.DataFrame(
+        {
+            "y_hit_10d": [1] * 50 + [0] * 950,
+            "x": np.arange(1000),
+        }
+    )
+    out = sample_rows_for_export(df, label_col="y_hit_10d", max_rows=100, random_seed=0)
+    assert len(out) == 100
+    assert out["y_hit_10d"].nunique() == 2

@@ -22,6 +22,8 @@ FORWARD_SESSIONS = 10
 MIN_FORWARD_RETURN = 0.05
 MIN_PRICE = 5.0
 EQ_ONLY = True
+TRADES_EXPORT_MAX = 5000
+TRADES_EXPORT_SEED = 42
 
 OUTPUT_DIR = DATA_DIR / "results" / "short_term_5pct_10d"
 
@@ -327,6 +329,29 @@ def trades_export_frame(
     return out[front + rest].sort_values(["entry_date", "Symbol"]).reset_index(drop=True)
 
 
+def sample_rows_for_export(
+    dataset: pd.DataFrame,
+    *,
+    label_col: str,
+    max_rows: int | None,
+    random_seed: int = TRADES_EXPORT_SEED,
+) -> pd.DataFrame:
+    if max_rows is None or len(dataset) <= max_rows:
+        return dataset
+    y = dataset[label_col].astype(int)
+    if y.nunique() < 2:
+        return dataset.sample(n=max_rows, random_state=random_seed).reset_index(drop=True)
+    from sklearn.model_selection import train_test_split
+
+    sample, _ = train_test_split(
+        dataset,
+        train_size=max_rows,
+        stratify=y,
+        random_state=random_seed,
+    )
+    return sample.reset_index(drop=True)
+
+
 def export_trades_csv(
     dataset: pd.DataFrame,
     *,
@@ -334,15 +359,21 @@ def export_trades_csv(
     forward_sessions: int,
     label_col: str,
     include_features: bool = True,
+    max_trades: int | None = TRADES_EXPORT_MAX,
+    random_seed: int = TRADES_EXPORT_SEED,
 ) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    src = sample_rows_for_export(
+        dataset, label_col=label_col, max_rows=max_trades, random_seed=random_seed
+    )
     trades = trades_export_frame(
-        dataset,
+        src,
         forward_sessions=forward_sessions,
         label_col=label_col,
         include_features=include_features,
     )
-    path = OUTPUT_DIR / f"trades_all_{tag}.csv"
+    suffix = f"n{len(trades)}" if max_trades is not None else "all"
+    path = OUTPUT_DIR / f"trades_{suffix}_{tag}.csv"
     trades.to_csv(path, index=False)
     return path
 
@@ -355,6 +386,8 @@ def export_results(
     forward_sessions: int = FORWARD_SESSIONS,
     label_col: str | None = None,
     export_trades: bool = True,
+    max_trades: int | None = TRADES_EXPORT_MAX,
+    trades_random_seed: int = TRADES_EXPORT_SEED,
 ) -> tuple[Path, Path, Path | None]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ds_path = OUTPUT_DIR / f"dataset_{tag}.parquet"
@@ -369,5 +402,7 @@ def export_results(
             tag=tag,
             forward_sessions=forward_sessions,
             label_col=label_col,
+            max_trades=max_trades,
+            random_seed=trades_random_seed,
         )
     return ds_path, rank_path, trades_path

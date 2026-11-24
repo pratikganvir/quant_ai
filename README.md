@@ -27,6 +27,36 @@ Expected layout (same as the old Drive `quant/data` tree):
 
 Override with `QUANT_DATA_DIR` if needed. `scripts/setup_ubuntu.sh` exports that into the Jupyter systemd service and symlinks `data/` in the repo to this folder.
 
+### Upstox (recommended daily source)
+
+Put your Upstox **access token** in `.env` as `UPSTOX_ACCESS_TOKEN` or `UPSTOX_API_KEY` (JWT from the developer console). Sync is **cache-first**:
+
+| Layer | Path | Purpose |
+|-------|------|---------|
+| Daily Parquet | `parquet/YYYY/nse_cm_YYYYMMDD.parquet` | Same layout as before; notebooks unchanged |
+| NSE instruments | `raw/upstox/instruments/nse_eq_map.json.gz` | `trading_symbol` → `instrument_key` |
+| Per-symbol history | `raw/upstox/symbols/nse/{SYMBOL}.parquet` | Full daily OHLCV for one symbol |
+| API response cache | `raw/upstox/api/day/*.json.gz` | Historical candle JSON (365d chunks) |
+| Manifest | `metadata/upstox_symbol_manifest.csv` | Last sync per symbol |
+
+```bash
+# All NSE EQ symbols (slow first run — then cached)
+PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --start 2010-01-01
+
+# Extend through today (reuses symbol + API gzip cache)
+PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --incremental
+
+# Single names first (e.g. TV parity)
+PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --symbols DALBHARAT,RELIANCE --start 2015-01-01
+
+# Rebuild nse_cm_* from disk only (no HTTP)
+PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --materialize-only --start 2015-01-01
+```
+
+Upstox daily candles return at most **~1 year per API call**; the client walks year-sized chunks and merges locally.
+
+Set `QUANT_DATA_SYNC_SOURCE=tejhq` if you still want TejHQ scripts by default on the VM.
+
 ### TejHQ (optional source)
 
 Put `TEJHQ_API_KEY` in the repo `.env` (gitignored). The sync client **stores everything locally** so reruns do not hit the API unless you ask it to:

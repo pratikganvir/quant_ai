@@ -53,6 +53,15 @@ TEJHQ_CACHE_DIR = Path(
 
 TEJHQ_MANIFEST_PATH = METADATA_DIR / "tejhq_sync_manifest.csv"
 
+UPSTOX_CACHE_DIR = Path(
+    os.getenv("UPSTOX_CACHE_DIR", str(RAW_DATA_DIR / "upstox"))
+).expanduser()
+
+UPSTOX_SYMBOL_MANIFEST_PATH = METADATA_DIR / "upstox_symbol_manifest.csv"
+
+# Preferred daily sync: upstox | tejhq (scripts only; both write nse_cm_*.parquet)
+DATA_SYNC_SOURCE = os.getenv("QUANT_DATA_SYNC_SOURCE", "upstox").lower()
+
 INDEX_DATA_DIR = DATA_DIR / "indices"
 
 NIFTY50_PATH = INDEX_DATA_DIR / "nifty50" / "NIFTY50.parquet"

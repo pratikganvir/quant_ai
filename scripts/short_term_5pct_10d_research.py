@@ -11,6 +11,33 @@ import sys
 import numpy as np
 import pandas as pd
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
+
+
+def _pbar(iterable=None, *, total: int | None = None, desc: str | None = None, disable: bool = False):
+    if tqdm is None:
+        if iterable is not None:
+            return iterable
+
+        class _NoBar:
+            def update(self, _n: int = 1) -> None:
+                pass
+
+            def set_postfix_str(self, _s: str) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        return _NoBar()
+
+    if iterable is not None:
+        return tqdm(iterable, desc=desc, total=total, disable=disable)
+    return tqdm(total=total, desc=desc, disable=disable)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -69,9 +96,18 @@ def prepare_bars(panel: pd.DataFrame, *, eq_only: bool = EQ_ONLY) -> pd.DataFram
     return x.sort_values(["Symbol", "Date"]).reset_index(drop=True)
 
 
-def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
+def compute_features(bars: pd.DataFrame, *, show_progress: bool = True) -> pd.DataFrame:
     x = bars.copy()
     g = x.groupby("Symbol", observed=True)
+    steps = (
+        "returns",
+        "volume",
+        "volatility",
+        "trend",
+        "structure",
+        "delivery",
+    )
+    bar = _pbar(total=len(steps), desc="Features", disable=not show_progress)
     prev_c = g["Close"].shift(1)
     tr = np.maximum(x["High"] - x["Low"], np.maximum((x["High"] - prev_c).abs(), (x["Low"] - prev_c).abs()))
     x["range_pct"] = tr / x["Close"]
@@ -80,6 +116,8 @@ def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
     x["ret_5"] = g["Close"].pct_change(5)
     x["ret_10"] = g["Close"].pct_change(10)
     x["ret_20"] = g["Close"].pct_change(20)
+    bar.update(1)
+    bar.set_postfix_str("returns")
 
     x["vol_rvol_5"] = x["Volume"] / g["Volume"].transform(lambda s: s.rolling(5, min_periods=3).mean())
     x["vol_rvol_20"] = x["Volume"] / g["Volume"].transform(lambda s: s.rolling(20, min_periods=10).mean())
@@ -87,10 +125,14 @@ def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
         lambda s: s.rolling(20, min_periods=10).mean()
     )
     x["turn_rvol_20"] = x["Turnover"] / g["Turnover"].transform(lambda s: s.rolling(20, min_periods=10).mean())
+    bar.update(1)
+    bar.set_postfix_str("volume")
 
     x["_tr"] = tr
     x["atrp_14"] = g["_tr"].transform(lambda s: s.rolling(14, min_periods=7).mean()) / x["Close"]
     x = x.drop(columns=["_tr"])
+    bar.update(1)
+    bar.set_postfix_str("volatility")
 
     sma20 = g["Close"].transform(lambda s: s.rolling(20, min_periods=10).mean())
     sma50 = g["Close"].transform(lambda s: s.rolling(50, min_periods=25).mean())
@@ -99,9 +141,13 @@ def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
     x["dist_sma50"] = x["Close"] / sma50 - 1.0
     x["sma20_slope_5"] = x["sma20"] / x.groupby("Symbol", observed=True)["sma20"].shift(5) - 1.0
     x = x.drop(columns=["sma20"])
+    bar.update(1)
+    bar.set_postfix_str("trend")
 
     hi20 = g["High"].transform(lambda s: s.rolling(20, min_periods=10).max())
     x["high_20_pct"] = x["Close"] / hi20 - 1.0
+    bar.update(1)
+    bar.set_postfix_str("structure")
 
     if "deliv_per" in x.columns:
         x["deliv_per"] = pd.to_numeric(x["deliv_per"], errors="coerce")
@@ -109,6 +155,8 @@ def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
         x["deliv_per"] = pd.to_numeric(x["DelivPer"], errors="coerce")
     else:
         x["deliv_per"] = np.nan
+    bar.update(1)
+    bar.close()
 
     return x
 
@@ -119,11 +167,17 @@ def attach_forward_labels(
     forward_sessions: int = FORWARD_SESSIONS,
     min_forward_return: float = MIN_FORWARD_RETURN,
     calendar: pd.DatetimeIndex | None = None,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
+    bar = _pbar(total=3, desc="Labels", disable=not show_progress)
     cal = calendar if calendar is not None else trading_calendar_from_panel(frame)
     x = frame.copy()
+    bar.update(1)
+    bar.set_postfix_str("calendar")
     x["exit_date"] = calendar_shift(cal, x["Date"], forward_sessions)
     exit_tbl = x[["Symbol", "Date", "Close"]].rename(columns={"Date": "exit_date", "Close": "exit_close"})
+    bar.update(1)
+    bar.set_postfix_str("merge exit")
     x = x.merge(exit_tbl, on=["Symbol", "exit_date"], how="left")
     x[f"fwd_ret_{forward_sessions}"] = x["exit_close"] / x["Close"] - 1.0
     x[f"horizon_ok_{forward_sessions}"] = x["exit_close"].notna()
@@ -131,6 +185,8 @@ def attach_forward_labels(
         x[f"horizon_ok_{forward_sessions}"]
         & x[f"fwd_ret_{forward_sessions}"].ge(min_forward_return)
     ).astype("int8")
+    bar.update(1)
+    bar.close()
     return x
 
 
@@ -143,12 +199,23 @@ def build_dataset(
     eq_only: bool = EQ_ONLY,
     date_start: pd.Timestamp | None = None,
     date_end: pd.Timestamp | None = None,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
+    root = _pbar(total=4, desc="Build dataset", disable=not show_progress)
     bars = prepare_bars(panel, eq_only=eq_only)
-    x = compute_features(bars)
+    root.update(1)
+    root.set_postfix_str("prepare bars")
+    x = compute_features(bars, show_progress=show_progress)
+    root.update(1)
+    root.set_postfix_str("features")
     x = attach_forward_labels(
-        x, forward_sessions=forward_sessions, min_forward_return=min_forward_return
+        x,
+        forward_sessions=forward_sessions,
+        min_forward_return=min_forward_return,
+        show_progress=show_progress,
     )
+    root.update(1)
+    root.set_postfix_str("labels")
     ok = x[f"horizon_ok_{forward_sessions}"]
     if min_price is not None:
         ok &= x["Close"] >= min_price
@@ -156,7 +223,10 @@ def build_dataset(
         ok &= x["Date"] >= pd.Timestamp(date_start)
     if date_end is not None:
         ok &= x["Date"] <= pd.Timestamp(date_end)
-    return x.loc[ok].copy()
+    out = x.loc[ok].copy()
+    root.update(1)
+    root.close()
+    return out
 
 
 def univariate_feature_rank(
@@ -164,12 +234,13 @@ def univariate_feature_rank(
     *,
     label_col: str,
     feature_cols: list[str] | None = None,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
     """Rank features by |median(hit) - median(miss)| / pooled std (Cohen's d-style)."""
     feature_cols = feature_cols or [c for c in FEATURE_COLS if c in ds.columns]
     y = ds[label_col].astype(int)
     rows: list[dict] = []
-    for col in feature_cols:
+    for col in _pbar(feature_cols, desc="Univariate rank", disable=not show_progress):
         s = pd.to_numeric(ds[col], errors="coerce")
         m = s.notna() & y.notna()
         if m.sum() < 100 or y.loc[m].nunique() < 2:
@@ -222,10 +293,13 @@ def prepare_rf_sample(
     max_rows: int = 400_000,
     random_seed: int = 42,
     min_coverage: float = 0.50,
+    show_progress: bool = True,
 ) -> tuple[pd.DataFrame, pd.Series, dict[str, int | float]]:
     """Median-imputed feature matrix + stratified subsample with both classes."""
+    bar = _pbar(total=3, desc="RF sample", disable=not show_progress)
     feature_cols = feature_cols or FEATURE_COLS
     feat_cols = select_rf_features(ds, feature_cols, min_coverage=min_coverage)
+    bar.update(1)
     if not feat_cols:
         raise ValueError("No features pass min_coverage — check panel columns.")
 
@@ -244,16 +318,20 @@ def prepare_rf_sample(
     X = ds[feat_cols].apply(pd.to_numeric, errors="coerce")
     X = X.fillna(X.median(numeric_only=True))
     frame = X.assign(_y=y)
+    bar.update(1)
+    bar.set_postfix_str("impute")
 
     if len(frame) > max_rows:
         from sklearn.model_selection import train_test_split
 
-        _, frame = train_test_split(
+        frame, _ = train_test_split(
             frame,
             train_size=max_rows,
             stratify=frame["_y"],
             random_state=random_seed,
         )
+    bar.update(1)
+    bar.close()
 
     y_out = frame["_y"].astype(int)
     X_out = frame.drop(columns=["_y"])
@@ -388,12 +466,18 @@ def export_results(
     export_trades: bool = True,
     max_trades: int | None = TRADES_EXPORT_MAX,
     trades_random_seed: int = TRADES_EXPORT_SEED,
+    show_progress: bool = True,
 ) -> tuple[Path, Path, Path | None]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ds_path = OUTPUT_DIR / f"dataset_{tag}.parquet"
     rank_path = OUTPUT_DIR / f"feature_rank_{tag}.csv"
+    bar = _pbar(total=3, desc="Export", disable=not show_progress)
     dataset.to_parquet(ds_path, index=False)
+    bar.update(1)
+    bar.set_postfix_str("parquet")
     rank.to_csv(rank_path, index=False)
+    bar.update(1)
+    bar.set_postfix_str("rank csv")
     trades_path = None
     if export_trades:
         label_col = label_col or f"y_hit_{forward_sessions}d"
@@ -405,4 +489,6 @@ def export_results(
             max_trades=max_trades,
             random_seed=trades_random_seed,
         )
+    bar.update(1)
+    bar.close()
     return ds_path, rank_path, trades_path

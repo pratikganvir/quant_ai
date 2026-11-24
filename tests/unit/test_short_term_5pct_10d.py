@@ -40,9 +40,16 @@ def test_prepare_rf_sample_stratified():
             "y_hit_10d": [1] * 20 + [0] * 180,
         }
     )
-    X, y, diag = prepare_rf_sample(df, label_col="y_hit_10d", feature_cols=["ret_1", "vol_rvol_20"], max_rows=100)
+    X, y, diag = prepare_rf_sample(
+        df,
+        label_col="y_hit_10d",
+        feature_cols=["ret_1", "vol_rvol_20"],
+        max_rows=100,
+        show_progress=False,
+    )
     assert y.nunique() == 2
     assert len(X) == 100
+    assert diag["rows_train"] == 100
     assert diag["hits_train"] >= 1
 
 

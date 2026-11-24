@@ -13,6 +13,11 @@ import sys
 
 import pandas as pd
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -55,19 +60,27 @@ def screen_output_paths(
     return latest, ever
 
 
-def load_panel() -> pd.DataFrame:
+def load_panel(*, show_progress: bool = True) -> pd.DataFrame:
     panel_path = DATA_DIR / "results" / "explosive_moves" / "panel" / "ohlcv_panel.parquet"
     if panel_path.exists():
         import pyarrow.parquet as pq
 
+        bar = tqdm(total=2, desc="Load panel parquet", disable=not show_progress or tqdm is None)
         have = set(pq.ParquetFile(panel_path).schema.names)
         cols = [c for c in ("Date", "Symbol", "Close", "Volume", "Turnover", "Series") if c in have]
+        if bar:
+            bar.update(1)
+            bar.set_postfix_str("schema")
         df = pd.read_parquet(panel_path, columns=cols)
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+        if bar:
+            bar.update(1)
+            bar.close()
         return df
 
     import duckdb
 
+    bar = tqdm(total=3, desc="Load panel (duckdb)", disable=not show_progress or tqdm is None)
     files = sorted(
         p
         for p in PARQUET_DATA_DIR.rglob("nse_cm_*.parquet")
@@ -75,6 +88,9 @@ def load_panel() -> pd.DataFrame:
     )
     if not files:
         raise FileNotFoundError(f"No nse_cm_*.parquet under {PARQUET_DATA_DIR}")
+    if bar:
+        bar.update(1)
+        bar.set_postfix_str(f"{len(files)} files")
 
     paths_sql = ", ".join(f"'{str(p).replace(chr(39), chr(39) * 2)}'" for p in files)
     sql = f"""
@@ -88,8 +104,14 @@ def load_panel() -> pd.DataFrame:
     FROM read_parquet([{paths_sql}], union_by_name=true)
     WHERE close IS NOT NULL AND close > 0
     """
+    if bar:
+        bar.update(1)
+        bar.set_postfix_str("query")
     df = duckdb.connect().execute(sql).df()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    if bar:
+        bar.update(1)
+        bar.close()
     return df
 
 
@@ -128,10 +150,13 @@ def _liquidity_column_names() -> tuple[list[str], list[str]]:
     return vol_cols, turn_cols
 
 
-def attach_liquidity_features(bars: pd.DataFrame) -> pd.DataFrame:
+def attach_liquidity_features(bars: pd.DataFrame, *, show_progress: bool = True) -> pd.DataFrame:
     x = bars.copy()
     g = x.groupby("Symbol", observed=True)
-    for w in LIQ_WINDOWS:
+    it = LIQ_WINDOWS
+    if tqdm is not None and show_progress:
+        it = tqdm(LIQ_WINDOWS, desc="Liquidity rollups")
+    for w in it:
         x[f"avg_volume_{w}d"] = g["Volume"].transform(
             lambda s, win=w: s.rolling(win, min_periods=win).mean()
         )
@@ -173,12 +198,13 @@ def _calendar_1y_one_symbol(g: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return merged
 
 
-def attach_calendar_1y_returns(bars: pd.DataFrame) -> pd.DataFrame:
+def attach_calendar_1y_returns(bars: pd.DataFrame, *, show_progress: bool = True) -> pd.DataFrame:
     # groupby subsets omit the grouping column (pandas 2.x); keep Symbol explicitly.
-    parts = [
-        _calendar_1y_one_symbol(g, str(sym))
-        for sym, g in bars.groupby("Symbol", observed=True)
-    ]
+    groups = list(bars.groupby("Symbol", observed=True))
+    it = groups
+    if tqdm is not None and show_progress:
+        it = tqdm(groups, desc="Calendar 1y returns", unit="sym")
+    parts = [_calendar_1y_one_symbol(g, str(sym)) for sym, g in it]
     if not parts:
         return bars.iloc[0:0].copy()
     return pd.concat(parts, ignore_index=True)

@@ -1,0 +1,15 @@
+# HTTPS in front of quant-monthly MCP (streamable HTTP at /mcp).
+#
+# 1. Point DNS: mcp.YOURDOMAIN.com -> your VM public IP (e.g. 78.47.81.36)
+# 2. Install Caddy on the VM: https://caddyserver.com/docs/install
+# 3. Copy this file to /etc/caddy/Caddyfile (adjust hostname)
+# 4. Run MCP on localhost only:
+#      PYTHONPATH=src QUANT_DATA_DIR=... python -m mcp_servers.quant_monthly --http 8765 --host 127.0.0.1
+# 5. sudo systemctl reload caddy
+#
+# ChatGPT plugin URL: https://mcp.YOURDOMAIN.com/mcp
+# Authentication: No authentication (or add Caddy basic_auth / OAuth later)
+
+mcp.YOURDOMAIN.com {
+	reverse_proxy 127.0.0.1:8765
+}

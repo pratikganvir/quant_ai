@@ -17,6 +17,7 @@ VENV_DIR="${VENV_DIR:-${PROJECT_ROOT}/.venv}"
 QUANT_PORT="${QUANT_PORT:-8765}"
 QUANT_BIND="${QUANT_BIND:-127.0.0.1}"
 QUANT_DATA_DIR="${QUANT_DATA_DIR:-/home/pratik/data/quant_ai}"
+MCP_ALLOWED_HOSTS="${MCP_ALLOWED_HOSTS:-mcp.marketsenseanalytics.com}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run with sudo: sudo $0" >&2
@@ -51,6 +52,7 @@ Environment=VIRTUAL_ENV=${VENV_DIR}
 Environment=PYTHONPATH=${PROJECT_ROOT}/src
 Environment=QUANT_PROJECT_ROOT=${PROJECT_ROOT}
 Environment=QUANT_DATA_DIR=${QUANT_DATA_DIR}
+Environment=MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS}
 ExecStart=${VENV_DIR}/bin/python -m mcp_servers.quant_monthly --http ${QUANT_PORT} --host ${QUANT_BIND}
 Restart=always
 RestartSec=5

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 
 from quant.config import UPSTOX_CACHE_DIR
 from quant.data.monthly_cache import (
@@ -103,6 +105,35 @@ async def http_monthly_bars(request: Request) -> Response:
     return JSONResponse({"symbol": symbol.strip().upper(), "count": len(bars), "bars": bars})
 
 
+def _streamable_http_transport_security() -> TransportSecuritySettings | None:
+    """Allow public Host headers when behind a reverse proxy (e.g. Cloudflare Tunnel)."""
+    flag = os.environ.get("MCP_DISABLE_DNS_REBINDING", "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    extra = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    if not extra:
+        return None
+
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*", "127.0.0.1", "localhost"]
+    allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    for part in extra.split(","):
+        host = part.strip()
+        if not host:
+            continue
+        allowed_hosts.append(host)
+        if ":*" not in host and ":" not in host:
+            allowed_hosts.append(f"{host}:*")
+        base = host.split(":")[0]
+        allowed_origins.extend([f"https://{base}", f"https://{base}:*", f"http://{base}", f"http://{base}:*"])
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     g = p.add_mutually_exclusive_group(required=True)
@@ -125,7 +156,12 @@ async def _main() -> None:
     if args.stdio:
         await server.run_stdio_async()
     elif args.http is not None:
-        await server.run_streamable_http_async(host=args.host, port=args.http, json_response=True)
+        await server.run_streamable_http_async(
+            host=args.host,
+            port=args.http,
+            json_response=True,
+            transport_security=_streamable_http_transport_security(),
+        )
     else:
         await server.run_sse_async(host=args.host, port=args.sse)
 

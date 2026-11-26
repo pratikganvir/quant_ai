@@ -66,6 +66,22 @@ DEFAULT_REGIME_MOMENTUM_PARAMS: dict[str, Any] = {
     "borrow_rate_annual": 0.11,
 }
 
+# **Target** ~2%/month geometric (~27% CAGR) in strong bull regimes only — not every calendar month.
+# Higher vol target + gross; walk-forward validate on your full universe before sizing (`scripts/validate_regime_momentum.py`).
+# For **margin** books see ``MONTH_HOLD_3X_PARAMS`` in ``month_hold_portfolio.py`` (~3× gross cap).
+REGIME_MOMENTUM_TARGET_2PCT_MONTHLY_PARAMS: dict[str, Any] = {
+    **DEFAULT_REGIME_MOMENTUM_PARAMS,
+    "bench_min_momentum": 0.03,
+    "target_vol_annual": 0.26,
+    "max_leverage": 1.5,
+    "min_leverage": 0.35,
+    "gross_cap": 1.15,
+    "top_k": 5,
+    "dd_hard_stop_pct": 15.0,
+    "dd_soft_stop_pct": 8.0,
+    "dd_soft_gross_scale": 0.5,
+}
+
 
 def regime_momentum_params_fingerprint(params: dict | None = None) -> dict[str, Any]:
     p = {**DEFAULT_REGIME_MOMENTUM_PARAMS, **(params or {})}

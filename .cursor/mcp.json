@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "quant-monthly": {
+      "url": "https://mcp.marketsenseanalytics.com/mcp"
+    },
+    "quant-monthly-local": {
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "mcp_servers.quant_monthly", "--stdio"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "QUANT_PROJECT_ROOT": "${workspaceFolder}",
+        "QUANT_DATA_DIR": "${env:QUANT_DATA_DIR}"
+      }
+    },
+    "quant-daily-local": {
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "mcp_servers.quant_daily", "--stdio"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "QUANT_PROJECT_ROOT": "${workspaceFolder}",
+        "QUANT_DATA_DIR": "${env:QUANT_DATA_DIR}"
+      }
+    }
+  }
+}

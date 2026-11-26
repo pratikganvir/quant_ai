@@ -1,4 +1,4 @@
-"""Institutional Accumulation — Balanced V4.7 (monthly bars, NSE backtest)."""
+"""Institutional Accumulation — Balanced V4.8 (monthly bars, NSE backtest)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,15 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-INST_ACC_ENGINE_VERSION = "5.0"
-STRATEGY_LABEL = "Institutional Accumulation - Balanced V4.7"
+INST_ACC_ENGINE_VERSION = "5.2"
+STRATEGY_LABEL = "Institutional Accumulation - Balanced V4.9"
+
+# Pine V4.7 risk defaults (for A/B vs tradingView overlay).
+V47_RISK_PARAMS: dict[str, float] = {
+    "profit_activation_atr": 2.0,
+    "profit_trail_atr": 3.5,
+    "wide_trail_after_atr": 0.0,
+}
 
 DEFAULT_PARAMS: dict[str, Any] = {
     # Entry — accumulation
@@ -36,8 +43,11 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "atr_length": 14,
     "initial_stop_atr": 2.5,
     "maximum_initial_stop_percent": 20.0,
-    "profit_activation_atr": 2.0,
-    "profit_trail_atr": 3.5,
+    "profit_activation_atr": 1.75,
+    "profit_trail_atr": 3.25,
+    "profit_trail_atr_tight": 3.25,
+    "profit_trail_atr_wide": 4.5,
+    "wide_trail_after_atr": 0.0,
     "minimum_profit_atr": 1.5,
     # Exit — larger trend
     "medium_ema_length": 12,
@@ -45,15 +55,28 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "trend_confirm_bars": 2,
     "minimum_holding_bars": 2,
     "cooldown_bars": 2,
-    # Portfolio
+    # Portfolio / drawdown budget
     "initial_capital": 100_000.0,
     "position_pct": 100.0,
+    "target_max_drawdown_pct": 0.0,
+    "drawdown_loss_streak_budget": 3.0,
+    "risk_per_trade_pct": 0.0,
+    "max_equity_drawdown_halt_pct": 0.0,
+    "max_gross_exposure_pct": 100.0,
+    "portfolio_slot_pct_scale": 0.4,
+    "min_stop_dist_pct": 0.5,
+    "backtest_mode": "per_symbol",
     "min_monthly_bars": 36,
     "min_price": 5.0,
     "eq_only": True,
     # Data quality (gaps)
     "max_missing_monthly_bars": 2,
     "max_monthly_gap_months": 2,
+    # Optional entry quality (off by default; set True to skip weak larger-trend entries).
+    "require_close_above_slow_ema": False,
+    "require_bull_ema_stack": False,
+    "minimum_slow_ema_slope_pct": 0.0,
+    "slow_ema_slope_lookback": 6,
 }
 
 DEFAULT_SYMBOL_CONTINUITY: dict[str, Any] = {
@@ -209,6 +232,60 @@ def _initial_stop_price(entry_px: float, entry_atr: float, p: dict) -> float:
     return float(max(atr_stop, pct_stop))
 
 
+def normalize_strategy_params(params: dict | None) -> dict:
+    """Apply derived risk caps when ``target_max_drawdown_pct`` is set."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    target = float(p.get("target_max_drawdown_pct", 0) or 0)
+    if target <= 0:
+        return p
+
+    out = dict(p)
+    if float(p.get("max_equity_drawdown_halt_pct", 0) or 0) <= 0:
+        out["max_equity_drawdown_halt_pct"] = target
+
+    mode = str(p.get("backtest_mode", "per_symbol")).strip().lower()
+    if mode == "portfolio":
+        if float(p.get("position_pct", 100)) >= 50:
+            scale = float(p.get("portfolio_slot_pct_scale", 0.4))
+            out["position_pct"] = max(2.0, min(25.0, target * scale))
+    else:
+        if float(p.get("risk_per_trade_pct", 0) or 0) <= 0:
+            streak = max(float(p.get("drawdown_loss_streak_budget", 3)), 1.0)
+            out["risk_per_trade_pct"] = target / streak
+        stop_cap = float(p.get("maximum_initial_stop_percent", 20))
+        if stop_cap > target + 5:
+            out["maximum_initial_stop_percent"] = min(stop_cap, max(8.0, target + 2.0))
+
+    return out
+
+
+def _entry_allocation(equity: float, open_px: float, entry_atr: float, p: dict) -> float:
+    if equity <= 0 or open_px <= 0:
+        return 0.0
+    cap_pct = float(p["position_pct"])
+    max_alloc = equity * cap_pct / 100.0
+    risk = float(p.get("risk_per_trade_pct", 0) or 0)
+    if risk > 0 and np.isfinite(entry_atr) and entry_atr > 0:
+        initial = _initial_stop_price(open_px, entry_atr, p)
+        stop_dist_pct = max((open_px - initial) / open_px * 100.0, float(p.get("min_stop_dist_pct", 0.5)))
+        risk_alloc = equity * (risk / stop_dist_pct)
+        return float(min(max_alloc, risk_alloc, equity))
+    return float(min(max_alloc, equity))
+
+
+def _equity_drawdown_pct(equity: float, peak: float) -> float:
+    if peak <= 0:
+        return 0.0
+    return (equity / peak - 1.0) * 100.0
+
+
+def _entries_halted_by_drawdown(equity: float, peak: float, p: dict) -> bool:
+    halt = float(p.get("max_equity_drawdown_halt_pct", 0) or 0)
+    if halt <= 0:
+        return False
+    return _equity_drawdown_pct(equity, peak) <= -halt
+
+
 def _exit_stop_price(open_px: float, low_px: float, stop: float) -> float:
     if low_px <= stop:
         return float(open_px if open_px < stop else stop)
@@ -283,6 +360,10 @@ def compute_accumulation_frame(monthly: pd.DataFrame, params: dict | None = None
     breakout_condition = cl > prev_high
     breakout_filter = (~bool(p["use_breakout"])) | breakout_condition
 
+    atr_value = _atr(h, lo, cl, int(p["atr_length"]))
+    medium_ema = _ema(cl, int(p["medium_ema_length"]))
+    slow_ema = _ema(cl, int(p["slow_ema_length"]))
+
     entry_condition = (
         accumulation_condition
         & ema_trend_condition
@@ -290,10 +371,17 @@ def compute_accumulation_frame(monthly: pd.DataFrame, params: dict | None = None
         & efficiency_condition
         & breakout_filter
     )
+    if bool(p.get("require_close_above_slow_ema")):
+        entry_condition = entry_condition & (cl > slow_ema)
+    if bool(p.get("require_bull_ema_stack")):
+        entry_condition = entry_condition & (medium_ema > slow_ema)
+    min_slow_slope = float(p.get("minimum_slow_ema_slope_pct", 0) or 0)
+    if min_slow_slope > 0:
+        selb = int(p.get("slow_ema_slope_lookback", 6))
+        slow_denom = slow_ema.shift(selb)
+        slow_slope = ((slow_ema / slow_denom - 1) * 100).where((slow_denom > 0) & slow_denom.notna(), 0.0)
+        entry_condition = entry_condition & (slow_slope >= min_slow_slope)
 
-    atr_value = _atr(h, lo, cl, int(p["atr_length"]))
-    medium_ema = _ema(cl, int(p["medium_ema_length"]))
-    slow_ema = _ema(cl, int(p["slow_ema_length"]))
     tcb = int(p["trend_confirm_bars"])
     below_medium = (cl < medium_ema).astype(float)
     below_medium_count = below_medium.rolling(tcb, min_periods=tcb).sum()
@@ -348,7 +436,13 @@ def _update_profit_trail(
     if max_gain_atr < float(p["profit_activation_atr"]):
         st.active_stop = st.initial_stop
         return
-    trail = st.highest_since_entry - atr * float(p["profit_trail_atr"])
+    trail_mult = float(p["profit_trail_atr"])
+    wide_after = float(p.get("wide_trail_after_atr", 0) or 0)
+    if wide_after > 0:
+        tight = float(p.get("profit_trail_atr_tight", trail_mult))
+        wide = float(p.get("profit_trail_atr_wide", trail_mult))
+        trail_mult = wide if max_gain_atr >= wide_after else tight
+    trail = st.highest_since_entry - atr * trail_mult
     lock = st.entry_px + st.entry_atr * float(p["minimum_profit_atr"])
     candidate = max(trail, lock)
     prev = st.profit_trail_stop if st.profit_trail_stop is not None else candidate
@@ -489,11 +583,15 @@ def _simulate_symbol_core(
     cd = int(p["cooldown_bars"])
     shares = 0.0
     entry_dt = None
+    peak_equity = cash
 
     for i in range(n):
         row = x.iloc[i]
         opn, hi, lo, cl = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
         dt = row["Date"]
+        mtm = cash + shares * cl if shares > 0 else cash
+        peak_equity = max(peak_equity, mtm)
+        entries_halted = _entries_halted_by_drawdown(mtm, peak_equity, p)
 
         if shares > 0 and trend_exit_pending and pos is not None:
             cash += shares * opn
@@ -538,11 +636,11 @@ def _simulate_symbol_core(
 
         if shares == 0 and pending_atr is not None:
             eq = cash
-            alloc = min(eq * alloc_pct / 100.0, cash)
+            entry_atr = pending_atr if np.isfinite(pending_atr) and pending_atr > 0 else float(row["atr"])
+            alloc = _entry_allocation(eq, opn, entry_atr, p)
             if alloc > 0 and opn > 0:
                 shares = alloc / opn
                 cash -= alloc
-                entry_atr = pending_atr if np.isfinite(pending_atr) and pending_atr > 0 else float(row["atr"])
                 initial = _initial_stop_price(opn, entry_atr, p)
                 pos = _PositionBarState(
                     entry_bar=i,
@@ -557,14 +655,19 @@ def _simulate_symbol_core(
             pending_atr = None
 
         cooled = last_exit is None or (i - last_exit) > cd
-        if shares == 0 and pending_atr is None and cooled and bool(row["entry_condition"]):
-            if i + 1 < n:
-                pending_atr = float(row["atr"]) if np.isfinite(row["atr"]) else np.nan
+        if (
+            shares == 0
+            and pending_atr is None
+            and cooled
+            and not entries_halted
+            and bool(row["entry_condition"])
+            and i + 1 < n
+        ):
+            pending_atr = float(row["atr"]) if np.isfinite(row["atr"]) else np.nan
 
         if pos is not None and shares > 0 and pos.entry_bar != i:
             _update_profit_trail(pos, high=hi, atr=float(row["atr"]), p=p)
 
-        mtm = cash + shares * cl if shares > 0 else cash
         equity_rows.append({"Date": dt, "equity": mtm})
 
     if shares > 0 and pos is not None:
@@ -589,7 +692,7 @@ def backtest_symbol_monthly(
     df: pd.DataFrame,
     params: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    p = {**DEFAULT_PARAMS, **(params or {})}
+    p = normalize_strategy_params(params)
     x = build_trade_signals(df, p)
     if x.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -613,7 +716,7 @@ def backtest_portfolio_monthly(
     params: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Shared cash; V4.7 stops/exits per symbol; next-month open fills."""
-    p = {**DEFAULT_PARAMS, **(params or {})}
+    p = normalize_strategy_params(params)
     if signals.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -633,6 +736,20 @@ def backtest_portfolio_monthly(
     trades: list[dict] = []
     equity_rows: list[dict] = []
     max_missing = int(p["max_missing_monthly_bars"])
+    peak_equity = cash
+    gross_cap_pct = float(p.get("max_gross_exposure_pct", 100) or 100)
+
+    def _portfolio_mtm(cur_df: pd.DataFrame) -> float:
+        mtm = cash
+        for s, ps in positions.items():
+            if s in cur_df.index:
+                cr = cur_df.loc[s]
+                if isinstance(cr, pd.DataFrame):
+                    cr = cr.iloc[0]
+                mtm += ps.shares * float(cr["Close"])
+            elif np.isfinite(ps.last_close) and ps.last_close > 0:
+                mtm += ps.shares * ps.last_close
+        return mtm
 
     for mi in range(1, len(months)):
         m_prev, m = months[mi - 1], months[mi]
@@ -726,20 +843,22 @@ def backtest_portfolio_monthly(
             if isinstance(row, pd.DataFrame):
                 row = row.iloc[0]
             opn, hi = float(row["Open"]), float(row["High"])
-            mtm = cash
-            for s, ps in positions.items():
-                if s in cur.index:
-                    cr = cur.loc[s]
-                    if isinstance(cr, pd.DataFrame):
-                        cr = cr.iloc[0]
-                    mtm += ps.shares * float(cr["Close"])
-            alloc = min(mtm * float(p["position_pct"]) / 100.0, cash)
+            mtm = _portfolio_mtm(cur)
+            peak_equity = max(peak_equity, mtm)
+            invested = sum(
+                ps.shares * float(cur.loc[s].iloc[0]["Close"] if isinstance(cur.loc[s], pd.DataFrame) else cur.loc[s]["Close"])
+                for s, ps in positions.items()
+                if s in cur.index
+            )
+            atr = patr if np.isfinite(patr) and patr > 0 else float(row["atr"])
+            alloc = _entry_allocation(mtm, opn, atr, p)
+            gross_room = max(0.0, mtm * gross_cap_pct / 100.0 - invested)
+            alloc = min(alloc, cash, gross_room)
             if alloc <= 0 or opn <= 0:
                 del pending_atr[sym]
                 continue
             sh = alloc / opn
             cash -= alloc
-            atr = patr if np.isfinite(patr) and patr > 0 else float(row["atr"])
             initial = _initial_stop_price(opn, atr, p)
             positions[sym] = _PortfolioPos(
                 shares=sh,
@@ -759,7 +878,11 @@ def backtest_portfolio_monthly(
             )
             del pending_atr[sym]
 
-        if not prev_panel.empty:
+        mtm_now = _portfolio_mtm(cur)
+        peak_equity = max(peak_equity, mtm_now)
+        entries_halted = _entries_halted_by_drawdown(mtm_now, peak_equity, p)
+
+        if not prev_panel.empty and not entries_halted:
             for _, prow in prev_panel.iterrows():
                 sym = prow["Symbol"]
                 if sym in positions or sym in pending_atr:
@@ -831,6 +954,29 @@ def summarize_backtest(
     )
 
 
+def _backtest_universe_portfolio_monthly(
+    monthly: pd.DataFrame,
+    p: dict,
+    *,
+    show_progress: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    signals = compute_signals_monthly(monthly, p, show_progress=show_progress)
+    trades, equity = backtest_portfolio_monthly(signals, p)
+    summary = summarize_backtest(trades, equity, float(p["initial_capital"]))
+    n_months = monthly[["Date"]].drop_duplicates().shape[0] if not monthly.empty else 0
+    stats = pd.DataFrame(
+        [
+            {
+                "Symbol": "PORTFOLIO",
+                "n_monthly_bars": int(n_months),
+                "had_trades": len(trades) > 0,
+                **{k: getattr(summary, k) for k in summary.__dataclass_fields__},
+            }
+        ]
+    )
+    return trades, stats
+
+
 def backtest_universe_monthly(
     monthly: pd.DataFrame,
     params: dict | None = None,
@@ -838,14 +984,16 @@ def backtest_universe_monthly(
     show_progress: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    TradingView-style: one independent backtest per valid symbol (100% equity each).
+    Per-symbol (TradingView overlay) or shared-cash portfolio when ``backtest_mode=portfolio``.
     """
     try:
         from tqdm.auto import tqdm
     except ImportError:  # pragma: no cover
         tqdm = None  # type: ignore
 
-    p = {**DEFAULT_PARAMS, **(params or {})}
+    p = normalize_strategy_params(params)
+    if str(p.get("backtest_mode", "per_symbol")).strip().lower() == "portfolio":
+        return _backtest_universe_portfolio_monthly(monthly, p, show_progress=show_progress)
     gap_drop = symbols_with_large_monthly_gaps(monthly, int(p["max_monthly_gap_months"]))
     groups = list(monthly.groupby("Symbol", observed=True))
     sym_iter: Any = groups

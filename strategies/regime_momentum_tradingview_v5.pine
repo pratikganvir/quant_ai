@@ -1,0 +1,582 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Regime Momentum Portfolio v1.3 — mirrors quant/src/quant/research/regime_momentum_portfolio.py
+//
+// HOW TO USE IN TRADINGVIEW
+// 1. Paste into Pine Editor → Add to chart.
+// 2. Set chart timeframe to **1 month** (critical).
+// 3. Open any NSE chart (e.g. NSE:NIFTYBEES).
+// 4. Configure **Universe 01–20** inputs (request.security needs simple-string symbols — no CSV loops).
+// 5. **Portfolio book** = teal simulated equity. **Chart symbol** = Strategy Tester long/flat on the open chart when it is a top-K pick (test each stock on its own chart).
+//
+//@version=6
+string GRP_MODE = "Backtest mode"
+string i_mode = input.string("Chart symbol", "Mode", options=["Chart symbol", "Portfolio book", "Benchmark proxy"], group=GRP_MODE)
+bool   i_overlayMarks = input.bool(true, "Show long/flat markers on price chart", group=GRP_MODE)
+
+// overlay must be const — script attaches to price chart (required for per-stock Strategy Tester).
+strategy(
+     "Regime Momentum Portfolio v1.3",
+     overlay = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.03,
+     slippage = 2,
+     margin_long = 0,
+     margin_short = 0,
+     calc_on_every_tick = false,
+     process_orders_on_close = false)
+
+string GRP_CORE = "Core"
+string i_bench      = input.string("NSE:NIFTYBEES", "Benchmark (regime)", group=GRP_CORE)
+int    i_topK       = input.int(5, "top_k", minval=1, maxval=20, group=GRP_CORE)
+int    i_momLb      = input.int(12, "mom_lookback_months", minval=3, group=GRP_CORE)
+int    i_momSkip    = input.int(1, "mom_skip_months", minval=1, group=GRP_CORE)
+int    i_benchSma   = input.int(12, "bench_sma_months", minval=2, group=GRP_CORE)
+float  i_benchMinMo = input.float(0.0, "bench_min_momentum", step=0.01, group=GRP_CORE)
+int    i_volLb      = input.int(12, "vol_lookback_months", minval=3, group=GRP_CORE)
+float  i_targetVol  = input.float(0.18, "target_vol_annual", step=0.01, group=GRP_CORE)
+float  i_maxLev     = input.float(1.25, "max_leverage", step=0.05, group=GRP_CORE)
+float  i_minLev     = input.float(0.25, "min_leverage", step=0.05, group=GRP_CORE)
+float  i_grossCap   = input.float(1.0, "gross_cap", step=0.05, group=GRP_CORE)
+float  i_maxNameW   = input.float(0.22, "max_name_weight", step=0.01, group=GRP_CORE)
+float  i_ddStop     = input.float(12.0, "dd_hard_stop_pct", step=0.5, group=GRP_CORE)
+float  i_cashYield  = input.float(0.06, "cash_yield_annual", step=0.01, group=GRP_CORE)
+int    i_minHist    = input.int(36, "min_history_months", minval=12, group=GRP_CORE)
+
+string GRP_UNI = "Universe filter"
+float  i_minClose   = input.float(20.0, "universe_min_close", group=GRP_UNI)
+float  i_minMedVol  = input.float(0.0, "universe_min_median_volume", group=GRP_UNI)
+int    i_topLiq     = input.int(200, "universe_top_n_liquidity", minval=0, group=GRP_UNI)
+int    i_liqLb      = input.int(12, "universe_liquidity_lookback_months", minval=1, group=GRP_UNI)
+
+string GRP_LIST = "Universe (20 slots)"
+int    N_SYM = 20
+int    IDX_CHART = 20
+string s01 = input.symbol("NSE:RELIANCE", "01", group=GRP_LIST)
+string s02 = input.symbol("NSE:TCS", "02", group=GRP_LIST)
+string s03 = input.symbol("NSE:HDFCBANK", "03", group=GRP_LIST)
+string s04 = input.symbol("NSE:INFY", "04", group=GRP_LIST)
+string s05 = input.symbol("NSE:ICICIBANK", "05", group=GRP_LIST)
+string s06 = input.symbol("NSE:HINDUNILVR", "06", group=GRP_LIST)
+string s07 = input.symbol("NSE:ITC", "07", group=GRP_LIST)
+string s08 = input.symbol("NSE:SBIN", "08", group=GRP_LIST)
+string s09 = input.symbol("NSE:BHARTIARTL", "09", group=GRP_LIST)
+string s10 = input.symbol("NSE:KOTAKBANK", "10", group=GRP_LIST)
+string s11 = input.symbol("NSE:LT", "11", group=GRP_LIST)
+string s12 = input.symbol("NSE:AXISBANK", "12", group=GRP_LIST)
+string s13 = input.symbol("NSE:ASIANPAINT", "13", group=GRP_LIST)
+string s14 = input.symbol("NSE:MARUTI", "14", group=GRP_LIST)
+string s15 = input.symbol("NSE:TITAN", "15", group=GRP_LIST)
+string s16 = input.symbol("NSE:SUNPHARMA", "16", group=GRP_LIST)
+string s17 = input.symbol("NSE:BAJFINANCE", "17", group=GRP_LIST)
+string s18 = input.symbol("NSE:WIPRO", "18", group=GRP_LIST)
+string s19 = input.symbol("NSE:HCLTECH", "19", group=GRP_LIST)
+string s20 = input.symbol("NSE:ULTRACEMCO", "20", group=GRP_LIST)
+
+bool   i_showTable       = input.bool(true, "Show picks table", group=GRP_LIST)
+
+// One request.security per slot (symbol must be simple string — cannot loop dynamic tickers).
+pack(string sym) =>
+    request.security(
+         sym,
+         "M",
+         [
+             close[1],
+             close[1] / close[i_momLb + i_momSkip] - 1.0,
+             ta.median(volume, i_liqLb),
+             ta.stdev(ta.change(close), i_volLb) * math.sqrt(12),
+             close[1] / close[2] - 1.0,
+             open,
+             close
+         ],
+         barmerge.gaps_off,
+         barmerge.lookahead_off,
+         ignore_invalid_symbol=true)
+
+f_ann(float vol) =>
+    na(vol) or vol <= 0 ? 0.25 : vol
+
+f_bar_mret(float opn, float cls) =>
+    na(opn) or na(cls) or opn == 0 ? 0.0 : cls / opn - 1.0
+
+[px01, mom01, medv01, vol01r, xs01, o01, c01] = pack(s01)
+vol01 = f_ann(vol01r)
+ret01 = f_bar_mret(o01, c01)
+[px02, mom02, medv02, vol02r, xs02, o02, c02] = pack(s02)
+vol02 = f_ann(vol02r)
+ret02 = f_bar_mret(o02, c02)
+[px03, mom03, medv03, vol03r, xs03, o03, c03] = pack(s03)
+vol03 = f_ann(vol03r)
+ret03 = f_bar_mret(o03, c03)
+[px04, mom04, medv04, vol04r, xs04, o04, c04] = pack(s04)
+vol04 = f_ann(vol04r)
+ret04 = f_bar_mret(o04, c04)
+[px05, mom05, medv05, vol05r, xs05, o05, c05] = pack(s05)
+vol05 = f_ann(vol05r)
+ret05 = f_bar_mret(o05, c05)
+[px06, mom06, medv06, vol06r, xs06, o06, c06] = pack(s06)
+vol06 = f_ann(vol06r)
+ret06 = f_bar_mret(o06, c06)
+[px07, mom07, medv07, vol07r, xs07, o07, c07] = pack(s07)
+vol07 = f_ann(vol07r)
+ret07 = f_bar_mret(o07, c07)
+[px08, mom08, medv08, vol08r, xs08, o08, c08] = pack(s08)
+vol08 = f_ann(vol08r)
+ret08 = f_bar_mret(o08, c08)
+[px09, mom09, medv09, vol09r, xs09, o09, c09] = pack(s09)
+vol09 = f_ann(vol09r)
+ret09 = f_bar_mret(o09, c09)
+[px10, mom10, medv10, vol10r, xs10, o10, c10] = pack(s10)
+vol10 = f_ann(vol10r)
+ret10 = f_bar_mret(o10, c10)
+[px11, mom11, medv11, vol11r, xs11, o11, c11] = pack(s11)
+vol11 = f_ann(vol11r)
+ret11 = f_bar_mret(o11, c11)
+[px12, mom12, medv12, vol12r, xs12, o12, c12] = pack(s12)
+vol12 = f_ann(vol12r)
+ret12 = f_bar_mret(o12, c12)
+[px13, mom13, medv13, vol13r, xs13, o13, c13] = pack(s13)
+vol13 = f_ann(vol13r)
+ret13 = f_bar_mret(o13, c13)
+[px14, mom14, medv14, vol14r, xs14, o14, c14] = pack(s14)
+vol14 = f_ann(vol14r)
+ret14 = f_bar_mret(o14, c14)
+[px15, mom15, medv15, vol15r, xs15, o15, c15] = pack(s15)
+vol15 = f_ann(vol15r)
+ret15 = f_bar_mret(o15, c15)
+[px16, mom16, medv16, vol16r, xs16, o16, c16] = pack(s16)
+vol16 = f_ann(vol16r)
+ret16 = f_bar_mret(o16, c16)
+[px17, mom17, medv17, vol17r, xs17, o17, c17] = pack(s17)
+vol17 = f_ann(vol17r)
+ret17 = f_bar_mret(o17, c17)
+[px18, mom18, medv18, vol18r, xs18, o18, c18] = pack(s18)
+vol18 = f_ann(vol18r)
+ret18 = f_bar_mret(o18, c18)
+[px19, mom19, medv19, vol19r, xs19, o19, c19] = pack(s19)
+vol19 = f_ann(vol19r)
+ret19 = f_bar_mret(o19, c19)
+[px20, mom20, medv20, vol20r, xs20, o20, c20] = pack(s20)
+vol20 = f_ann(vol20r)
+ret20 = f_bar_mret(o20, c20)
+
+string chartId = syminfo.tickerid
+bool chartIsBench = chartId == i_bench or syminfo.prefix + ":" + syminfo.ticker == i_bench
+
+[pxC, momC, medvC, volCr, xsC, oC, cC] = pack(chartId)
+volC = f_ann(volCr)
+retC = f_bar_mret(oC, cC)
+
+f_sig_close_bench() =>
+    request.security(i_bench, "M", close[1], barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+f_bench_sma() =>
+    request.security(i_bench, "M", ta.sma(close, i_benchSma)[1], barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+f_bench_mom() =>
+    request.security(
+         i_bench,
+         "M",
+         close[1] / close[i_momLb + i_momSkip] - 1.0,
+         barmerge.gaps_off,
+         barmerge.lookahead_off,
+         ignore_invalid_symbol=true)
+
+f_lbl(int i) =>
+    switch i
+        0 => s01
+        1 => s02
+        2 => s03
+        3 => s04
+        4 => s05
+        5 => s06
+        6 => s07
+        7 => s08
+        8 => s09
+        9 => s10
+        10 => s11
+        11 => s12
+        12 => s13
+        13 => s14
+        14 => s15
+        15 => s16
+        16 => s17
+        17 => s18
+        18 => s19
+        19 => s20
+        20 => chartId
+        => ""
+
+f_chart_slot() =>
+    int slot = -1
+    for i = 0 to N_SYM - 1
+        if f_lbl(i) == chartId
+            slot := i
+    slot
+
+f_px(int i) =>
+    switch i
+        0 => px01
+        1 => px02
+        2 => px03
+        3 => px04
+        4 => px05
+        5 => px06
+        6 => px07
+        7 => px08
+        8 => px09
+        9 => px10
+        10 => px11
+        11 => px12
+        12 => px13
+        13 => px14
+        14 => px15
+        15 => px16
+        16 => px17
+        17 => px18
+        18 => px19
+        19 => px20
+        20 => pxC
+        => na
+
+f_mom(int i) =>
+    switch i
+        0 => mom01
+        1 => mom02
+        2 => mom03
+        3 => mom04
+        4 => mom05
+        5 => mom06
+        6 => mom07
+        7 => mom08
+        8 => mom09
+        9 => mom10
+        10 => mom11
+        11 => mom12
+        12 => mom13
+        13 => mom14
+        14 => mom15
+        15 => mom16
+        16 => mom17
+        17 => mom18
+        18 => mom19
+        19 => mom20
+        20 => momC
+        => na
+
+f_medv(int i) =>
+    switch i
+        0 => medv01
+        1 => medv02
+        2 => medv03
+        3 => medv04
+        4 => medv05
+        5 => medv06
+        6 => medv07
+        7 => medv08
+        8 => medv09
+        9 => medv10
+        10 => medv11
+        11 => medv12
+        12 => medv13
+        13 => medv14
+        14 => medv15
+        15 => medv16
+        16 => medv17
+        17 => medv18
+        18 => medv19
+        19 => medv20
+        20 => medvC
+        => na
+
+f_vol(int i) =>
+    switch i
+        0 => vol01
+        1 => vol02
+        2 => vol03
+        3 => vol04
+        4 => vol05
+        5 => vol06
+        6 => vol07
+        7 => vol08
+        8 => vol09
+        9 => vol10
+        10 => vol11
+        11 => vol12
+        12 => vol13
+        13 => vol14
+        14 => vol15
+        15 => vol16
+        16 => vol17
+        17 => vol18
+        18 => vol19
+        19 => vol20
+        20 => volC
+        => na
+
+f_xs(int i) =>
+    switch i
+        0 => xs01
+        1 => xs02
+        2 => xs03
+        3 => xs04
+        4 => xs05
+        5 => xs06
+        6 => xs07
+        7 => xs08
+        8 => xs09
+        9 => xs10
+        10 => xs11
+        11 => xs12
+        12 => xs13
+        13 => xs14
+        14 => xs15
+        15 => xs16
+        16 => xs17
+        17 => xs18
+        18 => xs19
+        19 => xs20
+        20 => xsC
+        => na
+
+f_mret(int i) =>
+    switch i
+        0 => ret01
+        1 => ret02
+        2 => ret03
+        3 => ret04
+        4 => ret05
+        5 => ret06
+        6 => ret07
+        7 => ret08
+        8 => ret09
+        9 => ret10
+        10 => ret11
+        11 => ret12
+        12 => ret13
+        13 => ret14
+        14 => ret15
+        15 => ret16
+        16 => ret17
+        17 => ret18
+        18 => ret19
+        19 => ret20
+        20 => retC
+        => 0.0
+
+bool modeChart = i_mode == "Chart symbol"
+bool modePort = i_mode == "Portfolio book"
+bool modeBench = i_mode == "Benchmark proxy"
+
+var float portEquity = strategy.initial_capital
+var float peakEquity = strategy.initial_capital
+var array<int> heldIdx = array.new_int()
+var array<float> heldW = array.new_float()
+
+int warmup = math.max(i_momLb + i_momSkip, i_volLb, i_benchSma, i_minHist) + 2
+bool isMonthly = timeframe.ismonthly
+bool barReady = barstate.isconfirmed and isMonthly and bar_index >= warmup
+
+// Cross-sectional mean monthly return (vol targeting)
+float xsSum = 0.0
+int xsN = 0
+for i = 0 to N_SYM - 1
+    float xr = f_xs(i)
+    if not na(xr)
+        xsSum += xr
+        xsN += 1
+float xsRet = xsN > 0 ? xsSum / xsN : na
+
+var array<float> xsRetHist = array.new_float()
+if barReady and not na(xsRet)
+    array.push(xsRetHist, xsRet)
+    if array.size(xsRetHist) > i_volLb
+        array.shift(xsRetHist)
+
+float bClose = f_sig_close_bench()
+float bSma   = f_bench_sma()
+float bMom   = f_bench_mom()
+
+float eqPre = nz(portEquity[1], strategy.initial_capital)
+peakEquity := math.max(peakEquity, nz(eqPre, portEquity))
+float ddPct = peakEquity > 0 ? (eqPre / peakEquity - 1.0) * 100.0 : 0.0
+bool fused  = ddPct <= -i_ddStop
+
+bool riskOn = barReady and not fused and not na(bClose) and not na(bSma) and bClose >= bSma and nz(bMom, -1e9) >= i_benchMinMo
+
+float grossLev = 1.0
+float deployFrac = 0.0
+array<int> picks = array.new_int()
+array<float> pickW = array.new_float()
+bool chartIsPick = false
+float chartWeight = 0.0
+int chartTradeIdx = -1
+int chartSlot = f_chart_slot()
+
+if barReady
+    float cashM = 1.0 + i_cashYield / 12.0
+    if not riskOn
+        portEquity := nz(eqPre, portEquity) * cashM
+        array.clear(heldIdx)
+        array.clear(heldW)
+    else
+        array<int> eligible = array.new_int()
+        array<float> liqScore = array.new_float()
+        for i = 0 to N_SYM - 1
+            string sym = f_lbl(i)
+            if sym == i_bench
+                continue
+            float px = f_px(i)
+            float mv = f_medv(i)
+            if na(px) or px < i_minClose
+                continue
+            if i_minMedVol > 0 and (na(mv) or mv < i_minMedVol)
+                continue
+            array.push(eligible, i)
+            array.push(liqScore, nz(mv, 0.0))
+
+        if modeChart and not chartIsBench and chartSlot < 0
+            float px = f_px(IDX_CHART)
+            float mv = f_medv(IDX_CHART)
+            if not na(px) and px >= i_minClose and (i_minMedVol <= 0 or (not na(mv) and mv >= i_minMedVol))
+                array.push(eligible, IDX_CHART)
+                array.push(liqScore, nz(mv, 0.0))
+
+        int nEl = array.size(eligible)
+        int capLiq = math.min(i_topLiq, nEl)
+        if nEl > 0 and i_topLiq > 0 and nEl > capLiq
+            for k = 0 to nEl - capLiq - 1
+                int worst = 0
+                float worstV = array.get(liqScore, 0)
+                for j = 1 to array.size(liqScore) - 1
+                    float v = array.get(liqScore, j)
+                    if v < worstV
+                        worstV := v
+                        worst := j
+                array.remove(eligible, worst)
+                array.remove(liqScore, worst)
+
+        for k = 0 to i_topK - 1
+            int bestI = -1
+            float bestM = -1e18
+            for j = 0 to array.size(eligible) - 1
+                int idx = array.get(eligible, j)
+                float m = f_mom(idx)
+                if not na(m) and m > bestM
+                    bestM := m
+                    bestI := j
+            if bestI >= 0
+                array.push(picks, array.get(eligible, bestI))
+                array.remove(eligible, bestI)
+
+        int nP = array.size(picks)
+        if nP > 0
+            float invSum = 0.0
+            array<float> inv = array.new_float()
+            for i = 0 to nP - 1
+                int idx = array.get(picks, i)
+                float vol = f_vol(idx)
+                float sc = 1.0 / math.max(vol, 0.08)
+                array.push(inv, sc)
+                invSum += sc
+            float wSum = 0.0
+            for i = 0 to nP - 1
+                float w = array.get(inv, i) / invSum
+                w := math.min(w, i_maxNameW)
+                array.push(pickW, w)
+                wSum += w
+            for i = 0 to nP - 1
+                array.set(pickW, i, array.get(pickW, i) / wSum)
+
+            float portVol = 0.2
+            if array.size(xsRetHist) >= 2
+                float st = array.stdev(xsRetHist)
+                portVol := nz(st * math.sqrt(12), 0.2)
+            if portVol <= 0
+                portVol := 0.2
+            grossLev := math.min(i_grossCap, math.max(i_minLev, math.min(i_maxLev, i_targetVol / portVol)))
+            deployFrac := grossLev
+
+            float eq0 = nz(eqPre, portEquity)
+            float deploy = eq0 * deployFrac
+            float basketRet = 0.0
+            for i = 0 to nP - 1
+                int idx = array.get(picks, i)
+                float w = array.get(pickW, i)
+                basketRet += w * f_mret(idx)
+            portEquity := deploy * (1.0 + basketRet) + (eq0 - deploy)
+            heldIdx := array.copy(picks)
+            heldW := array.copy(pickW)
+
+            chartTradeIdx := chartSlot >= 0 ? chartSlot : IDX_CHART
+            for pi = 0 to nP - 1
+                if array.get(picks, pi) == chartTradeIdx
+                    chartIsPick := true
+                    chartWeight := array.get(pickW, pi)
+        else
+            portEquity := nz(eqPre, portEquity) * cashM
+
+plot(modePort ? portEquity : na, "Simulated portfolio equity", color=color.new(color.teal, 0), linewidth=2)
+plot(modePort ? peakEquity : na, "Peak equity", color=color.new(color.gray, 60), linewidth=1)
+plot(ddPct, "Book drawdown %", color=color.new(color.red, 0), display=modePort ? display.all : display.none)
+hline(-i_ddStop, "DD fuse", color=color.red, linestyle=hline.style_dashed)
+
+color bg = riskOn ? color.new(color.green, 88) : color.new(color.orange, 88)
+bgcolor(barReady ? bg : na, title="Regime")
+
+float chartQtyPct = chartIsPick and riskOn ? deployFrac * chartWeight * 100.0 : 0.0
+float proxyPct = deployFrac * 100.0
+
+if barReady and not chartIsBench
+    if modeChart
+        if chartQtyPct > 0
+            strategy.entry("RM", strategy.long, qty=chartQtyPct, comment="In top " + str.tostring(i_topK))
+        else
+            strategy.close("RM", comment="Out / risk off")
+    if modeBench and chartIsBench
+        if riskOn and proxyPct > 0
+            strategy.entry("RM", strategy.long, qty=proxyPct, comment="Regime ON")
+        if not riskOn
+            strategy.close("RM", comment="Risk off / fuse")
+
+bool showLong = modeChart and barReady and chartQtyPct > 0
+bool showFlat = modeChart and barReady and chartQtyPct <= 0
+plotshape(i_overlayMarks and showLong, "Long (in book)", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.tiny)
+plotshape(i_overlayMarks and showFlat and riskOn, "Flat (not top K)", shape.xcross, location.abovebar, color.new(color.gray, 30), size=size.tiny)
+plotshape(i_overlayMarks and showFlat and not riskOn, "Risk off", shape.triangledown, location.abovebar, color.new(color.orange, 0), size=size.tiny)
+
+var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 15))
+if i_showTable and barstate.islast
+    table.cell(t, 0, 0, "Regime Momentum v1.3", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, isMonthly ? "Monthly OK" : "Set 1M TF!", text_color=isMonthly ? color.lime : color.red, text_size=size.small)
+    table.cell(t, 0, 1, "Risk ON", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 1, riskOn ? "YES" : "NO", text_color=riskOn ? color.lime : color.orange, text_size=size.small)
+    table.cell(t, 0, 2, "DD %", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(ddPct, "#.##"), text_size=size.small)
+    table.cell(t, 0, 3, "Gross", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(deployFrac * 100, "#.#") + "%", text_size=size.small)
+    table.cell(t, 0, 4, "Bench mom", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(bMom * 100, "#.##") + "%", text_size=size.small)
+    if modeChart and not chartIsBench
+        table.cell(t, 0, 9, "This chart", text_color=color.gray, text_size=size.tiny)
+        string cs = chartIsPick ? "IN top " + str.tostring(i_topK) + " w=" + str.tostring(chartWeight * 100, "#.#") + "%" : "Not selected"
+        table.cell(t, 1, 9, cs, text_color=chartIsPick ? color.lime : color.gray, text_size=size.tiny)
+        table.cell(t, 0, 10, "12-1 mom", text_color=color.gray, text_size=size.tiny)
+        float cm = chartTradeIdx >= 0 ? f_mom(chartTradeIdx) : momC
+        table.cell(t, 1, 10, str.tostring(cm * 100, "#.##") + "%", text_size=size.tiny)
+    for i = 0 to 4
+        string lab = "Pick " + str.tostring(i + 1)
+        string val = "—"
+        if i < array.size(heldIdx)
+            int idx = array.get(heldIdx, i)
+            val := f_lbl(idx) + " " + str.tostring(array.get(heldW, i) * 100, "#.#") + "%"
+        table.cell(t, 0, 5 + i, lab, text_color=color.gray, text_size=size.tiny)
+        table.cell(t, 1, 5 + i, val, text_size=size.tiny)
+
+alertcondition(barReady and riskOn and not riskOn[1], "Regime turned ON", "Regime Momentum: risk ON")
+alertcondition(barReady and not riskOn and riskOn[1], "Regime turned OFF", "Regime Momentum: risk OFF")
+alertcondition(barReady and chartIsPick and not chartIsPick[1], "Chart entered book", "Symbol entered top-K book")
+alertcondition(barReady and not chartIsPick and chartIsPick[1], "Chart left book", "Symbol left top-K book")

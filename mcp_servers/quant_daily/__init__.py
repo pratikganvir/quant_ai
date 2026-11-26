@@ -1,0 +1,1 @@
+"""MCP + HTTP access to cached Upstox daily NSE bars."""

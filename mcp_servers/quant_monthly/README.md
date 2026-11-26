@@ -43,18 +43,38 @@ Overrides: `QUANT_USER`, `QUANT_DATA_DIR`, `QUANT_PORT`, `QUANT_BIND` (see scrip
 
 ## Cursor MCP config
 
-Add to project or user MCP settings (adjust paths and `QUANT_DATA_DIR`):
+This repo includes **`.cursor/mcp.json`**:
+
+| Name | Use when |
+|------|----------|
+| `quant-monthly` | Remote VM (`https://mcp.marketsenseanalytics.com/mcp`) — default |
+| `quant-monthly-local` | Same machine as data cache; set `QUANT_DATA_DIR` in your shell/env |
+
+After editing: **Cursor Settings → MCP** → enable the server → **reload window**.
+
+Remote entry (Streamable HTTP, no auth):
 
 ```json
 {
   "mcpServers": {
     "quant-monthly": {
-      "command": "/path/to/quant/.venv/bin/python",
+      "url": "https://mcp.marketsenseanalytics.com/mcp"
+    }
+  }
+}
+```
+
+Local stdio (Mac with VM data path or synced cache):
+
+```json
+{
+  "mcpServers": {
+    "quant-monthly-local": {
+      "command": "${workspaceFolder}/.venv/bin/python",
       "args": ["-m", "mcp_servers.quant_monthly", "--stdio"],
-      "cwd": "/path/to/quant",
       "env": {
-        "PYTHONPATH": "src",
-        "QUANT_DATA_DIR": "/path/to/your/quant/data"
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "QUANT_DATA_DIR": "${env:QUANT_DATA_DIR}"
       }
     }
   }

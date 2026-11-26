@@ -11,5 +11,13 @@
 # Authentication: No authentication (or add Caddy basic_auth / OAuth later)
 
 mcp.YOURDOMAIN.com {
+	# Optional: daily MCP on 8766 (install_quant_daily_mcp_service.sh)
+	handle /api/daily/* {
+		reverse_proxy 127.0.0.1:8766
+	}
+	handle /mcp/daily {
+		uri strip_prefix /mcp/daily
+		reverse_proxy 127.0.0.1:8766
+	}
 	reverse_proxy 127.0.0.1:8765
 }

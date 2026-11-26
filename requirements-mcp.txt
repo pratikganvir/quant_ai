@@ -1,4 +1,4 @@
-# Optional: MCP server + HTTP transport (mcp_servers/quant_monthly)
+# Optional: MCP server + HTTP transport (mcp_servers/quant_monthly, quant_daily)
 mcp>=1.26.0
 fastapi>=0.115.0
 uvicorn>=0.32.0

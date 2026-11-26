@@ -11,7 +11,10 @@ from quant.data.upstox import (
     _year_chunks,
     candles_to_dataframe,
     expand_fetch_window,
+    gap_ranges_from_missing_units,
     max_inclusive_calendar_days,
+    missing_symbol_calendar_units,
+    symbol_api_chunks,
     symbol_fetch_ranges,
 )
 
@@ -88,6 +91,33 @@ def test_symbol_fetch_ranges_skips_covered_window():
     existing = pd.DataFrame(
         {"date": [date(2024, 1, 2), date(2024, 6, 1), date(2024, 12, 30)]}
     )
-    assert symbol_fetch_ranges(existing, date(2024, 1, 2), date(2024, 12, 30)) == []
+    start, end = date(2024, 1, 2), date(2024, 12, 30)
+    # Interior weekday gaps still require fetch windows.
+    missing = missing_symbol_calendar_units(existing, start, end, interval="day")
+    assert missing, "weekdays between stored bars should be missing"
     tail = symbol_fetch_ranges(existing, date(2024, 1, 2), date(2025, 1, 15))
-    assert tail and tail[0][0] == date(2024, 12, 31)
+    assert tail
+    assert tail[-1][1] >= date(2025, 1, 10)
+
+
+def test_symbol_fetch_ranges_interior_gap_chunks():
+    # Mon 3, Wed 5 — missing Tue 4
+    existing = pd.DataFrame({"date": [date(2024, 6, 3), date(2024, 6, 5)]})
+    missing = missing_symbol_calendar_units(
+        existing, date(2024, 6, 3), date(2024, 6, 5), interval="day"
+    )
+    assert missing == [date(2024, 6, 4)]
+    gaps = gap_ranges_from_missing_units(missing, interval="day")
+    assert gaps == [(date(2024, 6, 4), date(2024, 6, 4))]
+    chunks = symbol_api_chunks(existing, date(2024, 6, 3), date(2024, 6, 5), interval="day")
+    assert chunks == [(date(2024, 6, 4), date(2024, 6, 4))]
+
+
+def test_missing_symbol_calendar_units_full_coverage():
+    weekdays = pd.bdate_range("2024-01-02", "2024-01-10", freq="B")
+    existing = pd.DataFrame({"date": [d.date() for d in weekdays]})
+    missing = missing_symbol_calendar_units(
+        existing, date(2024, 1, 2), date(2024, 1, 10), interval="day"
+    )
+    assert missing == []
+    assert symbol_fetch_ranges(existing, date(2024, 1, 2), date(2024, 1, 10)) == []

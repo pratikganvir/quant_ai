@@ -47,6 +47,7 @@ PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --start 2010-01-01
 PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --incremental
 
 # Single names first (e.g. TV parity)
+PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --symbol RELIANCE --start 2015-01-01
 PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --symbols DALBHARAT,RELIANCE --start 2015-01-01
 
 # Rebuild nse_cm_* from disk only (no HTTP)

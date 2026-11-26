@@ -237,6 +237,182 @@ def _interval_chunks(interval: CandleInterval, start: date, end: date) -> list[t
     return _range_chunks(start, end, interval=interval)
 
 
+def _last_day_of_month(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def _expected_units_in_range(start: date, end: date, *, interval: CandleInterval) -> list[date]:
+    """Calendar units we expect bars for in ``[start, end]`` (weekdays / month-ends / weeks)."""
+    if end < start:
+        return []
+    if interval == "day":
+        from quant.data.tejhq import iter_weekdays
+
+        return list(iter_weekdays(start, end))
+    if interval == "month":
+        units: list[date] = []
+        y, m = start.year, start.month
+        while True:
+            last = _last_day_of_month(y, m)
+            if last >= start and last <= end:
+                units.append(last)
+            if y > end.year or (y == end.year and m >= end.month):
+                break
+            if m == 12:
+                y, m = y + 1, 1
+            else:
+                m += 1
+        return units
+    if interval == "week":
+        units = []
+        d = start
+        while d.weekday() != 0:
+            d += timedelta(days=1)
+            if d > end:
+                return units
+        while d <= end:
+            units.append(d)
+            d += timedelta(days=7)
+        return units
+    units = []
+    d = start
+    while d <= end:
+        units.append(d)
+        d += timedelta(days=1)
+    return units
+
+
+def missing_symbol_calendar_units(
+    existing: pd.DataFrame,
+    start: date,
+    end: date,
+    *,
+    interval: CandleInterval = "day",
+) -> list[date]:
+    """Units in ``[start,end]`` absent from per-symbol cache (including interior gaps)."""
+    expected = _expected_units_in_range(start, end, interval=interval)
+    if not expected:
+        return []
+    if existing.empty or "date" not in existing.columns:
+        return expected
+
+    have_dates = pd.to_datetime(existing["date"], errors="coerce").dt.date.dropna()
+    if have_dates.empty:
+        return expected
+
+    have = set(have_dates)
+    if interval == "month":
+        have_months = {(d.year, d.month) for d in have}
+        return [d for d in expected if (d.year, d.month) not in have_months]
+    if interval == "week":
+        have_weeks = {(d.isocalendar().year, d.isocalendar().week) for d in have}
+        return [
+            d
+            for d in expected
+            if (d.isocalendar().year, d.isocalendar().week) not in have_weeks
+        ]
+    return [d for d in expected if d not in have]
+
+
+def _contiguous_calendar_ranges(sorted_dates: Sequence[date]) -> list[tuple[date, date]]:
+    if not sorted_dates:
+        return []
+    uniq = sorted(set(sorted_dates))
+    ranges: list[tuple[date, date]] = []
+    a = b = uniq[0]
+    for d in uniq[1:]:
+        if (d - b).days == 1:
+            b = d
+        else:
+            ranges.append((a, b))
+            a = b = d
+    ranges.append((a, b))
+    return ranges
+
+
+def _contiguous_month_ranges(month_ends: Sequence[date]) -> list[tuple[date, date]]:
+    if not month_ends:
+        return []
+    periods = sorted({(d.year, d.month) for d in month_ends})
+
+    def _next_month(y: int, m: int) -> tuple[int, int]:
+        return (y + 1, 1) if m == 12 else (y, m + 1)
+
+    groups: list[list[tuple[int, int]]] = []
+    grp = [periods[0]]
+    for p in periods[1:]:
+        if p == _next_month(*grp[-1]):
+            grp.append(p)
+        else:
+            groups.append(grp)
+            grp = [p]
+    groups.append(grp)
+
+    ranges: list[tuple[date, date]] = []
+    for grp in groups:
+        y0, m0 = grp[0]
+        y1, m1 = grp[-1]
+        ranges.append((date(y0, m0, 1), _last_day_of_month(y1, m1)))
+    return ranges
+
+
+def _contiguous_week_ranges(week_starts: Sequence[date]) -> list[tuple[date, date]]:
+    if not week_starts:
+        return []
+    uniq = sorted(set(week_starts))
+    ranges: list[tuple[date, date]] = []
+    a = b = uniq[0]
+    for d in uniq[1:]:
+        if (d - b).days == 7:
+            b = d
+        else:
+            ranges.append((a, b + timedelta(days=6)))
+            a = b = d
+    ranges.append((a, b + timedelta(days=6)))
+    return ranges
+
+
+def gap_ranges_from_missing_units(
+    missing: Sequence[date],
+    *,
+    interval: CandleInterval = "day",
+) -> list[tuple[date, date]]:
+    """Merge missing units into contiguous ``[from,to]`` gaps before max-width chunking."""
+    if not missing:
+        return []
+    if interval == "month":
+        gaps = _contiguous_month_ranges(list(missing))
+    elif interval == "week":
+        gaps = _contiguous_week_ranges(list(missing))
+    else:
+        gaps = _contiguous_calendar_ranges(list(missing))
+    return gaps
+
+
+def symbol_api_chunks(
+    existing: pd.DataFrame,
+    start: date,
+    end: date,
+    *,
+    interval: CandleInterval = "day",
+) -> list[tuple[date, date]]:
+    """API date windows (max Upstox width) for units missing from ``existing``."""
+    missing = missing_symbol_calendar_units(existing, start, end, interval=interval)
+    if not missing and not (existing.empty or "date" not in existing.columns):
+        return []
+    if existing.empty or "date" not in existing.columns:
+        return _interval_chunks(interval, start, end)
+    chunks: list[tuple[date, date]] = []
+    for gap_start, gap_end in gap_ranges_from_missing_units(missing, interval=interval):
+        clipped_start = max(gap_start, start)
+        clipped_end = min(gap_end, end)
+        if clipped_start <= clipped_end:
+            chunks.extend(_interval_chunks(interval, clipped_start, clipped_end))
+    return chunks
+
+
 def symbol_fetch_ranges(
     existing: pd.DataFrame,
     start: date,
@@ -244,25 +420,55 @@ def symbol_fetch_ranges(
     *,
     interval: CandleInterval = "day",
 ) -> list[tuple[date, date]]:
-    """Calendar ranges that still need API history for ``interval`` (day/month)."""
-    if existing.empty or "date" not in existing.columns:
-        return _interval_chunks(interval, start, end)
-    have = existing.copy()
-    have["date"] = pd.to_datetime(have["date"]).dt.date
-    have_max = max(have["date"])
-    have_min = min(have["date"])
-    if have_min <= start and have_max >= end:
-        return []
-    ranges: list[tuple[date, date]] = []
-    if have_min > start:
-        ranges.append((start, have_min - timedelta(days=1)))
-    if have_max < end:
-        ranges.append((have_max + timedelta(days=1), end))
-    chunks: list[tuple[date, date]] = []
-    for a, b in ranges:
-        if a <= b:
-            chunks.extend(_interval_chunks(interval, a, b))
-    return chunks
+    """Calendar ranges that still need API history for ``interval`` (day/month/week)."""
+    return symbol_api_chunks(existing, start, end, interval=interval)
+
+
+def planned_http_windows(
+    cache_root: Path,
+    instrument_key: str,
+    chunks: Sequence[tuple[date, date]],
+    *,
+    interval: CandleInterval = "day",
+    refresh_cache: bool = False,
+) -> list[tuple[date, date, date, date]]:
+    """List API calls as ``(gap_from, gap_to, fetch_from, fetch_to)``; skip gzip-backed windows."""
+    planned: list[tuple[date, date, date, date]] = []
+    for a, b in chunks:
+        fetch_from, fetch_to = expand_fetch_window(a, b, interval=interval)
+        if not refresh_cache and read_json_cache(
+            candle_api_cache_path(cache_root, instrument_key, fetch_to, fetch_from, interval=interval)
+        ) is not None:
+            continue
+        planned.append((a, b, fetch_from, fetch_to))
+    return planned
+
+
+def plan_symbol_sync(
+    cache_root: Path,
+    instrument_key: str,
+    existing: pd.DataFrame,
+    start: date,
+    end: date,
+    *,
+    interval: CandleInterval = "day",
+    refresh_cache: bool = False,
+) -> dict[str, Any]:
+    """Plan missing units and HTTP windows before any API calls."""
+    missing = missing_symbol_calendar_units(existing, start, end, interval=interval)
+    chunks = symbol_api_chunks(existing, start, end, interval=interval)
+    http = planned_http_windows(
+        cache_root, instrument_key, chunks, interval=interval, refresh_cache=refresh_cache
+    )
+    return {
+        "missing_units": missing,
+        "n_missing_units": len(missing),
+        "api_chunks": chunks,
+        "n_api_chunks": len(chunks),
+        "http_windows": http,
+        "n_http_calls": len(http),
+        "max_inclusive_days": max_inclusive_calendar_days(interval),
+    }
 
 
 def estimate_symbol_http_calls(
@@ -275,14 +481,11 @@ def estimate_symbol_http_calls(
 ) -> int:
     if refresh_cache:
         return len(chunks)
-    n = 0
-    for a, b in chunks:
-        fetch_from, fetch_to = expand_fetch_window(a, b, interval=interval)
-        if read_json_cache(
-            candle_api_cache_path(cache_root, instrument_key, fetch_to, fetch_from, interval=interval)
-        ) is None:
-            n += 1
-    return n
+    return len(
+        planned_http_windows(
+            cache_root, instrument_key, chunks, interval=interval, refresh_cache=refresh_cache
+        )
+    )
 
 
 @dataclass
@@ -422,7 +625,7 @@ class UpstoxClient:
             if "date" in existing.columns:
                 existing["date"] = pd.to_datetime(existing["date"]).dt.date
 
-        ranges_to_fetch = symbol_fetch_ranges(existing, start, end, interval=interval)
+        ranges_to_fetch = symbol_api_chunks(existing, start, end, interval=interval)
         if not ranges_to_fetch and not existing.empty:
             return {
                 "symbol": sym,
@@ -587,6 +790,99 @@ def missing_parquet_weekdays(parquet_root: Path, start: date, end: date) -> list
     return [d for d in iter_weekdays(start, end) if not day_has_valid_parquet(parquet_root, d)]
 
 
+def plan_upstox_universe(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    *,
+    interval: CandleInterval = "day",
+    client: UpstoxClient | None = None,
+    symbols: Sequence[str] | None = None,
+    max_symbols: int | None = None,
+    refresh_cache: bool = False,
+) -> dict[str, Any]:
+    """Aggregate per-symbol plans: missing units and HTTP call count."""
+    client = client or UpstoxClient()
+    imap = client.load_nse_eq_map()
+    syms = [s.upper() for s in (symbols or sorted(imap))]
+    if max_symbols:
+        syms = syms[: int(max_symbols)]
+
+    sym_plans: list[dict[str, Any]] = []
+    total_http = 0
+    all_missing: set[date] = set()
+    for sym in syms:
+        inst = imap.get(sym)
+        if not inst:
+            sym_plans.append({"symbol": sym, "status": "unknown_symbol", "n_http_calls": 0})
+            continue
+        path = symbol_history_path(client.cache_dir, sym, interval=interval)
+        existing = pd.DataFrame()
+        if path.is_file():
+            existing = pd.read_parquet(path)
+        plan = plan_symbol_sync(
+            client.cache_dir, inst, existing, start, end, interval=interval, refresh_cache=refresh_cache
+        )
+        total_http += int(plan["n_http_calls"])
+        all_missing.update(plan["missing_units"])
+        sym_plans.append(
+            {
+                "symbol": sym,
+                "status": "needs_fetch" if plan["n_missing_units"] else "cached",
+                "n_missing_units": plan["n_missing_units"],
+                "n_api_chunks": plan["n_api_chunks"],
+                "n_http_calls": plan["n_http_calls"],
+            }
+        )
+
+    missing_days_parquet: list[date] = []
+    if interval == "day":
+        missing_days_parquet = missing_parquet_weekdays(parquet_root, start, end)
+
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "interval": interval,
+        "max_inclusive_days": max_inclusive_calendar_days(interval),
+        "n_symbols": len(syms),
+        "n_http_calls_total": total_http,
+        "missing_unit_dates_union": sorted(all_missing),
+        "n_missing_units_union": len(all_missing),
+        "missing_parquet_weekdays": missing_days_parquet,
+        "symbols": sym_plans,
+    }
+
+
+def print_upstox_sync_plan(plan: Mapping[str, Any], *, list_missing_dates: bool = False) -> None:
+    """Human-readable plan emitted before HTTP sync."""
+    print(
+        f"Plan {plan['start']} .. {plan['end']} interval={plan['interval']} "
+        f"(max {plan['max_inclusive_days']}d/request)"
+    )
+    print(
+        f"  symbols={plan['n_symbols']} missing_units_union={plan['n_missing_units_union']} "
+        f"http_calls={plan['n_http_calls_total']}"
+    )
+    if plan.get("missing_parquet_weekdays") is not None:
+        mp = plan["missing_parquet_weekdays"]
+        print(f"  nse_cm parquets missing (weekdays): {len(mp)}")
+        if list_missing_dates and mp:
+            for d in mp[:50]:
+                print(f"    {d.isoformat()}")
+            if len(mp) > 50:
+                print(f"    ... +{len(mp) - 50} more")
+    needing = [s for s in plan["symbols"] if s.get("n_http_calls", 0) > 0]
+    if needing:
+        print(f"  symbols needing HTTP: {len(needing)}")
+        for row in needing[:20]:
+            print(
+                f"    {row['symbol']}: missing_units={row.get('n_missing_units', 0)} "
+                f"api_chunks={row.get('n_api_chunks', 0)} http={row.get('n_http_calls', 0)}"
+            )
+        if len(needing) > 20:
+            print(f"    ... +{len(needing) - 20} more symbols")
+
+
 def sync_upstox_universe(
     parquet_root: Path,
     start: date,
@@ -602,6 +898,8 @@ def sync_upstox_universe(
     overwrite_parquet: bool = False,
     dry_run: bool = False,
     show_progress: bool = True,
+    plan_before: bool = True,
+    list_missing_dates: bool = False,
 ) -> pd.DataFrame:
     """Fetch per-symbol history (cached). Materializes ``nse_cm_*`` only for ``interval=day``."""
     if materialize is None:
@@ -612,36 +910,44 @@ def sync_upstox_universe(
     if max_symbols:
         syms = syms[: int(max_symbols)]
 
+    if not dry_run and plan_before:
+        plan = plan_upstox_universe(
+            parquet_root,
+            start,
+            end,
+            interval=interval,
+            client=client,
+            symbols=syms,
+            refresh_cache=refresh_cache,
+        )
+        print_upstox_sync_plan(plan, list_missing_dates=list_missing_dates)
+
     missing_days: set[date] | None = None
     if materialize and materialize_only_missing and not overwrite_parquet:
         missing_days = set(missing_parquet_weekdays(parquet_root, start, end))
 
     if dry_run:
-        planned: list[dict[str, Any]] = []
-        for sym in syms:
-            inst = imap.get(sym)
-            if not inst:
-                planned.append({"symbol": sym, "status": "unknown_symbol", "api_calls_est": 0})
-                continue
-            path = symbol_history_path(client.cache_dir, sym, interval=interval)
-            existing = pd.DataFrame()
-            if path.is_file():
-                existing = pd.read_parquet(path)
-            chunks = symbol_fetch_ranges(existing, start, end, interval=interval)
-            planned.append(
-                {
-                    "symbol": sym,
-                    "status": "would_sync" if chunks else "cached",
-                    "interval": interval,
-                    "api_calls_est": estimate_symbol_http_calls(
-                        client.cache_dir,
-                        inst,
-                        chunks,
-                        interval=interval,
-                        refresh_cache=refresh_cache,
-                    ),
-                }
-            )
+        aggregate = plan_upstox_universe(
+            parquet_root,
+            start,
+            end,
+            interval=interval,
+            client=client,
+            symbols=syms,
+            refresh_cache=refresh_cache,
+        )
+        planned = [
+            {**row, "api_calls_est": row.get("n_http_calls", 0)}
+            for row in aggregate["symbols"]
+        ]
+        planned.append(
+            {
+                "status": "plan_summary",
+                "n_http_calls_total": aggregate["n_http_calls_total"],
+                "n_missing_units_union": aggregate["n_missing_units_union"],
+                "max_inclusive_days": aggregate["max_inclusive_days"],
+            }
+        )
         return pd.DataFrame(planned)
 
     try:

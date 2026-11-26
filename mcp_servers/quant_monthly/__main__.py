@@ -1,4 +1,4 @@
-"""Run Quant monthly-cache MCP server (stdio, SSE, or Streamable HTTP with REST routes)."""
+"""Run Quant Upstox cache MCP server — monthly + daily (stdio, HTTP, or SSE)."""
 
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from quant.config import UPSTOX_CACHE_DIR
+from quant.data.daily_cache import (
+    coverage_as_dicts as daily_coverage_as_dicts,
+    daily_symbols_dir,
+    get_daily_bars,
+    list_daily_stock_coverage,
+)
 from quant.data.monthly_cache import (
     coverage_as_dicts,
     get_monthly_bars,
@@ -29,13 +35,16 @@ from quant.data.monthly_cache import (
 
 server = MCPServer(
     "quant-monthly",
-    title="Quant NSE Monthly Cache",
-    description="Cached Upstox monthly OHLCV under QUANT_DATA_DIR/raw/upstox/symbols/nse_month/",
-    instructions=(
-        "Use list_available_stocks to see symbols with local monthly data, "
-        "then get_monthly_ohlcv for OHLCV rows. REST: GET /api/stocks and GET /api/monthly/{symbol}."
+    title="Quant NSE OHLCV Cache",
+    description=(
+        "Cached Upstox monthly (nse_month/) and daily (nse/) OHLCV under QUANT_DATA_DIR/raw/upstox/symbols/."
     ),
-    version="1.0.0",
+    instructions=(
+        "Monthly: list_available_stocks + get_monthly_ohlcv. "
+        "Daily: list_daily_stocks + get_daily_ohlcv. "
+        "REST: GET /api/stocks?interval=monthly|daily, /api/monthly/{symbol}, /api/daily/{symbol}."
+    ),
+    version="1.1.0",
 )
 
 
@@ -67,22 +76,72 @@ def get_monthly_ohlcv(
     return {"symbol": sym, "count": len(bars), "bars": bars}
 
 
+@server.tool(
+    title="List stocks with daily data",
+    description="Symbols that have a local Upstox daily parquet cache (first/last bar, row count).",
+)
+def list_daily_stocks() -> dict:
+    rows = list_daily_stock_coverage()
+    return {
+        "cache_dir": str(daily_symbols_dir()),
+        "count": len(rows),
+        "stocks": daily_coverage_as_dicts(rows),
+    }
+
+
+@server.tool(
+    title="Get daily OHLCV",
+    description="Return cached daily candles for one NSE symbol (optional date range, tail limit).",
+)
+def get_daily_ohlcv(
+    symbol: str,
+    date_start: str | None = None,
+    date_end: str | None = None,
+    limit: int | None = 500,
+) -> dict:
+    sym = symbol.strip().upper()
+    bars = get_daily_bars(sym, date_start=date_start, date_end=date_end, limit=limit)
+    return {"symbol": sym, "count": len(bars), "bars": bars}
+
+
+def _stock_interval(request: Request) -> str:
+    raw = (request.query_params.get("interval") or "monthly").strip().lower()
+    if raw in ("day", "daily", "d"):
+        return "daily"
+    return "monthly"
+
+
 @server.custom_route("/health", methods=["GET"], include_in_schema=True)
 async def health(_: Request) -> Response:
-    return JSONResponse({"status": "ok", "cache_dir": str(monthly_symbols_dir())})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "monthly_cache_dir": str(monthly_symbols_dir()),
+            "daily_cache_dir": str(daily_symbols_dir()),
+        }
+    )
 
 
 @server.custom_route("/api/stocks", methods=["GET"], include_in_schema=True)
 async def http_list_stocks(request: Request) -> Response:
     prefix = (request.query_params.get("prefix") or "").strip().upper()
-    rows = list_monthly_stock_coverage()
+    interval = _stock_interval(request)
+    if interval == "daily":
+        rows = list_daily_stock_coverage()
+        cache_dir = daily_symbols_dir()
+        stocks = daily_coverage_as_dicts(rows)
+    else:
+        rows = list_monthly_stock_coverage()
+        cache_dir = monthly_symbols_dir()
+        stocks = coverage_as_dicts(rows)
     if prefix:
-        rows = [r for r in rows if r.symbol.startswith(prefix)]
+        stocks = [r for r in stocks if r["symbol"].startswith(prefix)]
     return JSONResponse(
         {
-            "cache_dir": str(monthly_symbols_dir()),
-            "count": len(rows),
-            "stocks": coverage_as_dicts(rows),
+            "interval": interval,
+            "cache_dir": str(cache_dir),
+            "count": len(stocks),
+            "stocks": stocks,
         }
     )
 
@@ -93,6 +152,24 @@ async def http_monthly_bars(request: Request) -> Response:
     q = request.query_params
     try:
         bars = get_monthly_bars(
+            symbol,
+            date_start=q.get("start"),
+            date_end=q.get("end"),
+            limit=int(q["limit"]) if q.get("limit") else None,
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"symbol": symbol.strip().upper(), "count": len(bars), "bars": bars})
+
+
+@server.custom_route("/api/daily/{symbol}", methods=["GET"], include_in_schema=True)
+async def http_daily_bars(request: Request) -> Response:
+    symbol = request.path_params["symbol"]
+    q = request.query_params
+    try:
+        bars = get_daily_bars(
             symbol,
             date_start=q.get("start"),
             date_end=q.get("end"),
@@ -153,6 +230,7 @@ async def _main() -> None:
     args = _parse_args()
     print(f"UPSTOX_CACHE_DIR={UPSTOX_CACHE_DIR}", file=sys.stderr)
     print(f"monthly_symbols={monthly_symbols_dir()}", file=sys.stderr)
+    print(f"daily_symbols={daily_symbols_dir()}", file=sys.stderr)
     if args.stdio:
         await server.run_stdio_async()
     elif args.http is not None:

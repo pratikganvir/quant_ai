@@ -80,18 +80,7 @@ PYTHONPATH=src python -m mcp_servers.quant_monthly --http 8765
 
 Cursor MCP (stdio): see [`mcp_servers/quant_monthly/README.md`](mcp_servers/quant_monthly/README.md).
 
-### Daily cache MCP + REST
-
-After `sync_upstox_nse_daily` (per-symbol files under `raw/upstox/symbols/nse/`):
-
-```bash
-pip install -r requirements-mcp.txt
-PYTHONPATH=src python -m mcp_servers.quant_daily --http 8766
-# GET http://127.0.0.1:8766/api/stocks?prefix=REL
-# GET http://127.0.0.1:8766/api/daily/RELIANCE?limit=60
-```
-
-Cursor MCP: [`mcp_servers/quant_daily/README.md`](mcp_servers/quant_daily/README.md). VM: `sudo ./scripts/install_quant_daily_mcp_service.sh`.
+Daily bars use the **same** MCP as monthly (`quant_monthly` on port **8765**): `GET /api/daily/{symbol}` after `sync_upstox_nse_daily` fills `raw/upstox/symbols/nse/`.
 
 Set `QUANT_DATA_SYNC_SOURCE=tejhq` if you still want TejHQ scripts by default on the VM.
 

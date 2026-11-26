@@ -1,6 +1,6 @@
-# Quant monthly cache — MCP + REST
+# Quant OHLCV cache — MCP + REST
 
-Serves **local** Upstox monthly OHLCV from `raw/upstox/symbols/nse_month/` (no Upstox API calls).
+Serves **local** Upstox **monthly** (`nse_month/`) and **daily** (`nse/`) OHLCV (no Upstox API calls). One process, one port.
 
 ## Install
 
@@ -32,14 +32,15 @@ Overrides: `QUANT_USER`, `QUANT_DATA_DIR`, `QUANT_PORT`, `QUANT_BIND` (see scrip
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Liveness + cache directory |
-| GET | `/api/stocks` | All symbols with cache (`?prefix=REL`) |
-| GET | `/api/monthly/{symbol}` | Bars (`?start=2020-01-01&end=2024-12-31&limit=120`) |
+| GET | `/health` | Liveness + monthly/daily cache dirs |
+| GET | `/api/stocks` | Inventory (`?prefix=REL`, `?interval=daily` default monthly) |
+| GET | `/api/monthly/{symbol}` | Monthly bars (`?start=&end=&limit=120`) |
+| GET | `/api/daily/{symbol}` | Daily bars (`?start=&end=&limit=500`) |
 
 ## MCP tools
 
-- `list_available_stocks` — coverage inventory
-- `get_monthly_ohlcv` — bars for one symbol
+- `list_available_stocks` / `get_monthly_ohlcv` — monthly
+- `list_daily_stocks` / `get_daily_ohlcv` — daily
 
 ## Cursor MCP config
 

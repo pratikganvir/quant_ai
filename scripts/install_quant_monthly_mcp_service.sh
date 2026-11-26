@@ -38,7 +38,7 @@ fi
 
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
-Description=Quant NSE monthly cache MCP (Streamable HTTP + REST)
+Description=Quant NSE monthly+daily cache MCP (Streamable HTTP + REST)
 After=network-online.target
 Wants=network-online.target
 

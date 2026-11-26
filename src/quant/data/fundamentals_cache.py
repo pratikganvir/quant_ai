@@ -20,6 +20,24 @@ def fundamentals_coverage_as_dicts(rows: list[FundamentalsCoverage]) -> list[dic
     return [asdict(r) for r in rows]
 
 
+def get_key_ratios(
+    symbol: str,
+    *,
+    cache_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Cached Upstox key-ratios for one symbol."""
+    return get_fundamentals(symbol, "key-ratios", cache_dir=cache_dir)
+
+
+def list_stocks_with_key_ratios(
+    *,
+    cache_dir: Path | None = None,
+    symbols: Iterable[str] | None = None,
+) -> list[FundamentalsCoverage]:
+    rows = list_fundamentals_coverage(cache_dir=cache_dir or UPSTOX_CACHE_DIR, symbols=symbols)
+    return [r for r in rows if "key-ratios" in r.resources]
+
+
 def get_fundamentals(
     symbol: str,
     resource: str,

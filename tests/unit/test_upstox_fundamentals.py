@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quant.data.fundamentals_cache import get_fundamentals, list_stocks_with_fundamentals
+from quant.data.fundamentals_cache import (
+    get_fundamentals,
+    get_key_ratios,
+    list_stocks_with_fundamentals,
+    list_stocks_with_key_ratios,
+)
 from quant.data.upstox import write_json_cache
 from quant.data.upstox_fundamentals import (
     build_fundamentals_url,
@@ -44,3 +49,11 @@ def test_fundamentals_roundtrip_cache(tmp_path: Path):
 
     stocks = list_stocks_with_fundamentals(cache_dir=tmp_path)
     assert stocks[0].isin == "INE002A01018"
+
+    kr_path = symbol_fundamental_path(sym, "key-ratios", cache_dir=tmp_path)
+    write_json_cache(
+        kr_path,
+        {"status": "success", "data": {"pe": 12.5}, "_meta": {"isin": "INE002A01018"}},
+    )
+    assert list_stocks_with_key_ratios(cache_dir=tmp_path)[0].symbol == sym
+    assert get_key_ratios(sym, cache_dir=tmp_path)["data"]["pe"] == 12.5

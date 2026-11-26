@@ -61,6 +61,9 @@ PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --max-symbols 100
 # All NSE EQ (slow first run — cached files are skipped on reruns)
 ./scripts/sync_upstox_fundamentals_all.sh
 # or: PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --all-eq
+
+# Key ratios only (lighter; MCP GET /api/key-ratios/{symbol})
+./scripts/sync_upstox_key_ratios.sh
 ```
 
 Upstox daily candles return at most **365 calendar days (inclusive) per API call**; sync uses maximum-width forward chunks and widens short gaps to a full year via `expand_fetch_window`. Override with `UPSTOX_DAILY_MAX_INCLUSIVE_DAYS` if needed.

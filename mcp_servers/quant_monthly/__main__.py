@@ -29,7 +29,9 @@ from quant.data.daily_cache import (
 from quant.data.fundamentals_cache import (
     fundamentals_coverage_as_dicts,
     get_fundamentals,
+    get_key_ratios,
     list_stocks_with_fundamentals,
+    list_stocks_with_key_ratios,
 )
 from quant.data.monthly_cache import (
     coverage_as_dicts,
@@ -49,10 +51,12 @@ server = MCPServer(
         "Monthly: list_available_stocks + get_monthly_ohlcv. "
         "Daily: list_daily_stocks + get_daily_ohlcv. "
         "Fundamentals: list_fundamentals_stocks + get_fundamentals (cache from sync_upstox_fundamentals). "
+        "Key ratios: list_key_ratios_stocks + get_key_ratios. "
         "REST: GET /api/stocks?interval=monthly|daily, /api/monthly/{symbol}, /api/daily/{symbol}, "
-        "/api/fundamentals/stocks, /api/fundamentals/{symbol}/{resource}."
+        "/api/fundamentals/stocks, /api/fundamentals/{symbol}/{resource}, "
+        "/api/key-ratios/stocks, /api/key-ratios/{symbol}."
     ),
-    version="1.2.0",
+    version="1.2.1",
 )
 
 
@@ -146,6 +150,48 @@ def get_fundamentals_tool(
     except ValueError as exc:
         return {"symbol": sym, "resource": res, "error": str(exc), "status": "bad_request"}
     return {"symbol": sym, "resource": res, "status": data.get("status", "ok"), "data": data.get("data"), "meta": data.get("_meta")}
+
+
+@server.tool(
+    title="List stocks with key ratios",
+    description="Symbols that have cached Upstox key-ratios (sync via sync_upstox_key_ratios).",
+)
+def list_key_ratios_stocks() -> dict:
+    rows = list_stocks_with_key_ratios()
+    return {
+        "cache_dir": str(fundamentals_root()),
+        "count": len(rows),
+        "stocks": fundamentals_coverage_as_dicts(rows),
+    }
+
+
+@server.tool(
+    title="Get key ratios",
+    description="Return cached Upstox key-ratios for one NSE symbol.",
+)
+def get_key_ratios_tool(symbol: str) -> dict:
+    sym = symbol.strip().upper()
+    try:
+        data = get_key_ratios(sym)
+    except FileNotFoundError as exc:
+        return {"symbol": sym, "error": str(exc), "status": "missing"}
+    return {
+        "symbol": sym,
+        "status": data.get("status", "ok"),
+        "data": data.get("data"),
+        "meta": data.get("_meta"),
+    }
+
+
+def _key_ratios_payload(symbol: str) -> dict:
+    sym = symbol.strip().upper()
+    data = get_key_ratios(sym)
+    return {
+        "symbol": sym,
+        "status": data.get("status"),
+        "data": data.get("data"),
+        "meta": data.get("_meta"),
+    }
 
 
 def _stock_interval(request: Request) -> str:
@@ -242,6 +288,32 @@ async def http_list_fundamentals(request: Request) -> Response:
             "stocks": stocks,
         }
     )
+
+
+@server.custom_route("/api/key-ratios/stocks", methods=["GET"], include_in_schema=True)
+async def http_list_key_ratios(request: Request) -> Response:
+    prefix = (request.query_params.get("prefix") or "").strip().upper()
+    rows = list_stocks_with_key_ratios()
+    stocks = fundamentals_coverage_as_dicts(rows)
+    if prefix:
+        stocks = [r for r in stocks if r["symbol"].startswith(prefix)]
+    return JSONResponse(
+        {
+            "cache_dir": str(fundamentals_root()),
+            "count": len(stocks),
+            "stocks": stocks,
+        }
+    )
+
+
+@server.custom_route("/api/key-ratios/{symbol}", methods=["GET"], include_in_schema=True)
+async def http_key_ratios(request: Request) -> Response:
+    symbol = request.path_params["symbol"]
+    try:
+        payload = _key_ratios_payload(symbol)
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(payload)
 
 
 @server.custom_route("/api/fundamentals/{symbol}/{resource}", methods=["GET"], include_in_schema=True)

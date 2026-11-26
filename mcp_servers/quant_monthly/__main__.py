@@ -26,12 +26,18 @@ from quant.data.daily_cache import (
     get_daily_bars,
     list_daily_stock_coverage,
 )
+from quant.data.fundamentals_cache import (
+    fundamentals_coverage_as_dicts,
+    get_fundamentals,
+    list_stocks_with_fundamentals,
+)
 from quant.data.monthly_cache import (
     coverage_as_dicts,
     get_monthly_bars,
     list_monthly_stock_coverage,
     monthly_symbols_dir,
 )
+from quant.data.upstox_fundamentals import FUNDAMENTAL_RESOURCES, fundamentals_root
 
 server = MCPServer(
     "quant-monthly",
@@ -42,9 +48,11 @@ server = MCPServer(
     instructions=(
         "Monthly: list_available_stocks + get_monthly_ohlcv. "
         "Daily: list_daily_stocks + get_daily_ohlcv. "
-        "REST: GET /api/stocks?interval=monthly|daily, /api/monthly/{symbol}, /api/daily/{symbol}."
+        "Fundamentals: list_fundamentals_stocks + get_fundamentals (cache from sync_upstox_fundamentals). "
+        "REST: GET /api/stocks?interval=monthly|daily, /api/monthly/{symbol}, /api/daily/{symbol}, "
+        "/api/fundamentals/stocks, /api/fundamentals/{symbol}/{resource}."
     ),
-    version="1.1.0",
+    version="1.2.0",
 )
 
 
@@ -104,6 +112,42 @@ def get_daily_ohlcv(
     return {"symbol": sym, "count": len(bars), "bars": bars}
 
 
+@server.tool(
+    title="List stocks with fundamentals",
+    description="Symbols with cached Upstox fundamentals (profile, key-ratios, statements, etc.).",
+)
+def list_fundamentals_stocks() -> dict:
+    rows = list_stocks_with_fundamentals()
+    return {
+        "cache_dir": str(fundamentals_root()),
+        "count": len(rows),
+        "stocks": fundamentals_coverage_as_dicts(rows),
+        "resources": list(FUNDAMENTAL_RESOURCES),
+    }
+
+
+@server.tool(
+    title="Get fundamentals",
+    description=(
+        "Return cached Upstox fundamentals for one symbol. "
+        f"resource one of: {', '.join(FUNDAMENTAL_RESOURCES)}."
+    ),
+)
+def get_fundamentals_tool(
+    symbol: str,
+    resource: str = "profile",
+) -> dict:
+    sym = symbol.strip().upper()
+    res = resource.strip().lower()
+    try:
+        data = get_fundamentals(sym, res)
+    except FileNotFoundError as exc:
+        return {"symbol": sym, "resource": res, "error": str(exc), "status": "missing"}
+    except ValueError as exc:
+        return {"symbol": sym, "resource": res, "error": str(exc), "status": "bad_request"}
+    return {"symbol": sym, "resource": res, "status": data.get("status", "ok"), "data": data.get("data"), "meta": data.get("_meta")}
+
+
 def _stock_interval(request: Request) -> str:
     raw = (request.query_params.get("interval") or "monthly").strip().lower()
     if raw in ("day", "daily", "d"):
@@ -118,6 +162,7 @@ async def health(_: Request) -> Response:
             "status": "ok",
             "monthly_cache_dir": str(monthly_symbols_dir()),
             "daily_cache_dir": str(daily_symbols_dir()),
+            "fundamentals_cache_dir": str(fundamentals_root()),
         }
     )
 
@@ -182,6 +227,44 @@ async def http_daily_bars(request: Request) -> Response:
     return JSONResponse({"symbol": symbol.strip().upper(), "count": len(bars), "bars": bars})
 
 
+@server.custom_route("/api/fundamentals/stocks", methods=["GET"], include_in_schema=True)
+async def http_list_fundamentals(request: Request) -> Response:
+    prefix = (request.query_params.get("prefix") or "").strip().upper()
+    rows = list_stocks_with_fundamentals()
+    stocks = fundamentals_coverage_as_dicts(rows)
+    if prefix:
+        stocks = [r for r in stocks if r["symbol"].startswith(prefix)]
+    return JSONResponse(
+        {
+            "cache_dir": str(fundamentals_root()),
+            "count": len(stocks),
+            "resources": list(FUNDAMENTAL_RESOURCES),
+            "stocks": stocks,
+        }
+    )
+
+
+@server.custom_route("/api/fundamentals/{symbol}/{resource}", methods=["GET"], include_in_schema=True)
+async def http_fundamentals(request: Request) -> Response:
+    symbol = request.path_params["symbol"]
+    resource = request.path_params["resource"]
+    try:
+        data = get_fundamentals(symbol, resource)
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(
+        {
+            "symbol": symbol.strip().upper(),
+            "resource": resource.strip().lower(),
+            "status": data.get("status"),
+            "data": data.get("data"),
+            "meta": data.get("_meta"),
+        }
+    )
+
+
 def _streamable_http_transport_security() -> TransportSecuritySettings | None:
     """Allow public Host headers when behind a reverse proxy (e.g. Cloudflare Tunnel)."""
     flag = os.environ.get("MCP_DISABLE_DNS_REBINDING", "").strip().lower()
@@ -231,6 +314,7 @@ async def _main() -> None:
     print(f"UPSTOX_CACHE_DIR={UPSTOX_CACHE_DIR}", file=sys.stderr)
     print(f"monthly_symbols={monthly_symbols_dir()}", file=sys.stderr)
     print(f"daily_symbols={daily_symbols_dir()}", file=sys.stderr)
+    print(f"fundamentals={fundamentals_root()}", file=sys.stderr)
     if args.stdio:
         await server.run_stdio_async()
     elif args.http is not None:

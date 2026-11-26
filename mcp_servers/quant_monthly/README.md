@@ -1,6 +1,6 @@
 # Quant OHLCV cache — MCP + REST
 
-Serves **local** Upstox **monthly** (`nse_month/`) and **daily** (`nse/`) OHLCV (no Upstox API calls). One process, one port.
+Serves **local** Upstox **monthly** (`nse_month/`), **daily** (`nse/`) OHLCV, and **fundamentals** (`fundamentals/{SYMBOL}/`) JSON (no Upstox API on read). One process, one port.
 
 ## Install
 
@@ -32,15 +32,27 @@ Overrides: `QUANT_USER`, `QUANT_DATA_DIR`, `QUANT_PORT`, `QUANT_BIND` (see scrip
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Liveness + monthly/daily cache dirs |
+| GET | `/health` | Liveness + monthly/daily/fundamentals cache dirs |
 | GET | `/api/stocks` | Inventory (`?prefix=REL`, `?interval=daily` default monthly) |
 | GET | `/api/monthly/{symbol}` | Monthly bars (`?start=&end=&limit=120`) |
 | GET | `/api/daily/{symbol}` | Daily bars (`?start=&end=&limit=500`) |
+| GET | `/api/fundamentals/stocks` | Symbols with fundamentals cache (`?prefix=REL`) |
+| GET | `/api/fundamentals/{symbol}/{resource}` | Cached fundamentals (`profile`, `key-ratios`, …) |
 
 ## MCP tools
 
 - `list_available_stocks` / `get_monthly_ohlcv` — monthly
 - `list_daily_stocks` / `get_daily_ohlcv` — daily
+- `list_fundamentals_stocks` / `get_fundamentals` — fundamentals (populate via `scripts/sync_upstox_fundamentals.py`)
+
+### Sync fundamentals (Upstox API)
+
+```bash
+PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --symbol RELIANCE
+PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --max-symbols 50
+./scripts/sync_upstox_fundamentals_all.sh
+PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --resources profile,key-ratios
+```
 
 ## Cursor MCP config
 

@@ -36,6 +36,7 @@ Put your Upstox **access token** in `.env` as `UPSTOX_ACCESS_TOKEN` or `UPSTOX_A
 | Daily Parquet | `parquet/YYYY/nse_cm_YYYYMMDD.parquet` | Same layout as before; notebooks unchanged |
 | NSE instruments | `raw/upstox/instruments/nse_eq_map.json.gz` | `trading_symbol` → `instrument_key` |
 | Per-symbol history | `raw/upstox/symbols/nse/{SYMBOL}.parquet` | Full daily OHLCV for one symbol |
+| Fundamentals | `raw/upstox/fundamentals/{SYMBOL}/{resource}.json.gz` | Profile, ratios, statements (MCP reads cache only) |
 | API response cache | `raw/upstox/api/day/*.json.gz` | Historical candle JSON (365d chunks) |
 | Manifest | `metadata/upstox_symbol_manifest.csv` | Last sync per symbol |
 
@@ -52,6 +53,14 @@ PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --symbols DALBHARAT,RELIA
 
 # Rebuild nse_cm_* from disk only (no HTTP)
 PYTHONPATH=src python scripts/sync_upstox_nse_daily.py --materialize-only --start 2015-01-01
+
+# Fundamentals (profile, key-ratios, statements, …) → MCP GET /api/fundamentals/{symbol}/{resource}
+PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --symbol RELIANCE
+PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --max-symbols 100
+
+# All NSE EQ (slow first run — cached files are skipped on reruns)
+./scripts/sync_upstox_fundamentals_all.sh
+# or: PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --all-eq
 ```
 
 Upstox daily candles return at most **365 calendar days (inclusive) per API call**; sync uses maximum-width forward chunks and widens short gaps to a full year via `expand_fetch_window`. Override with `UPSTOX_DAILY_MAX_INCLUSIVE_DAYS` if needed.

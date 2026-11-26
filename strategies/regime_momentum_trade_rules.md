@@ -1,27 +1,28 @@
 # Regime Momentum Portfolio — Trade Rules (human execution)
 
-**Engine version:** `1.3` · **Code:** `src/quant/research/regime_momentum_portfolio.py`  
-**Style:** NSE monthly bars · one **portfolio** book · rebalance **once per month**
+**Engine version:** `1.5` · **Code:** `src/quant/research/regime_momentum_portfolio.py`  
+**Style:** NSE **monthly** bars · one **shared portfolio** · rebalance **once per month** at the **open**
 
-This document mirrors the backtest. You can run the same logic in the notebook (`strategies/institutional_accumulation_monthly.ipynb` with `strategy_engine: regime_momentum`) or scripts (`scripts/run_regime_momentum_full_universe.py`).
+Single-name / futures rules (not this book): see [`regime_dual_mom_trade_rules.md`](regime_dual_mom_trade_rules.md) and [`reliance_futures_monthly_trade_rules.md`](reliance_futures_monthly_trade_rules.md).
 
 ---
 
 ## What you are doing (one sentence)
 
-Each month, if India’s broad market regime is “on,” hold **5 liquid momentum leaders** with **inverse-volatility weights** and **volatility-scaled exposure**; otherwise hold **cash**.
+After each month closes, if the **Nifty regime is on** and your **book drawdown fuse** allows risk, hold **5 liquid 12–1 momentum leaders** with **inverse-vol weights** and **vol-scaled gross exposure**; otherwise hold **cash** (or accrue idle cash yield in the model).
 
 ---
 
-## Calendar (critical)
+## Calendar (non‑negotiable)
 
 | Step | When | Uses prices from |
 |------|------|------------------|
-| **Measure signals** | After the **last trading day** of month *T* (month-end close) | All closes through month *T* |
-| **Trade** | **Open** of the first trading session of month *T+1* | Month *T+1* **open** (backtest uses monthly bar open) |
-| **Mark portfolio** | Month *T+1* close | For reporting and next month’s drawdown check |
+| **Signals** | After the **last trading day** of month *T* | All **month-end closes** through *T* |
+| **Orders** | **Open** of the first session of month *T+1* | *T+1* **open** |
+| **Risk / DD mark** | Month *T* close equity (cash + MTM positions) | For fuse and gross sizing |
+| **Hold** | Until *T+2* open (full rebalance) or risk-off this month |
 
-Do **not** use month *T+1* close to pick names for month *T+1*; picks are fixed from month *T* data.
+Do **not** use month *T+1* close to choose names you buy at *T+1* open.
 
 ---
 
@@ -30,199 +31,272 @@ Do **not** use month *T+1* close to pick names for month *T+1*; picks are fixed 
 | Item | Default |
 |------|---------|
 | **Regime benchmark** | `NIFTYBEES` (Nifty 50 ETF) |
-| **Stock universe** | NSE names with **≥ 36 months** of monthly history in your data feed |
-| **Bar type** | **Monthly** OHLCV (same as MCP `/api/monthly/{symbol}`) |
+| **Universe** | Liquid NSE equities; default backtest uses **top 200 by median monthly volume** (see below) |
+| **Nifty 50 sleeve** | Optional: restrict to [`universe/nifty50_eq_symbols.txt`](../universe/nifty50_eq_symbols.txt) (50 names) |
+| **History** | ≥ **36 months** of monthly OHLCV per name |
+| **Data source** | MCP `/api/monthly/{symbol}` or local `QUANT_DATA_DIR` panel |
 
-You need: month-end **Close** (signals), month-start **Open** (orders), and **Volume** (liquidity filter).
-
----
-
-## Default parameters (v1.3)
-
-| Parameter | Value | Meaning |
-|-----------|------:|---------|
-| `top_k` | 5 | Number of stocks held |
-| `mom_lookback_months` | 12 | Momentum window |
-| `mom_skip_months` | 1 | Skip last month (12–1 momentum) |
-| `bench_sma_months` | 12 | Benchmark trend filter |
-| `bench_min_momentum` | 0% | Min 12m return on benchmark |
-| `vol_lookback_months` | 12 | Vol for weights & targeting |
-| `target_vol_annual` | 18% | Portfolio vol target |
-| `max_leverage` | 1.25 | Max gross scaling |
-| `min_leverage` | 0.25 | Min gross scaling |
-| `gross_cap` | 1.0 | Max 100% of equity deployed (before cap) |
-| `max_name_weight` | 22% | Cap weight per name (pre-renormalize) |
-| `dd_hard_stop_pct` | 12% | Peak-to-trough equity fuse |
-| `cash_yield_annual` | 6% | Monthly accrual on cash while risk-off |
-| `universe_min_close` | ₹20 | Min price at signal date |
-| `universe_top_n_liquidity` | 200 | Keep top N by median volume |
-| `universe_liquidity_lookback_months` | 12 | Volume lookback |
-| `universe_min_median_volume` | 0 | Optional extra volume floor |
-
-Benchmark and picks: **never** hold `NIFTYBEES` as a momentum stock (regime only).
+You need **Close** (signals), **Open** (orders), **Volume** (liquidity screen). Never hold `NIFTYBEES` as a momentum pick — regime only.
 
 ---
 
-## Monthly checklist
+## Pick a profile (live book)
 
-Do this **once**, after month *T* closes, orders for month *T+1* open.
+Choose **one** profile and stick to it for at least a year before tuning.
 
-### A. Portfolio health (drawdown fuse)
+### A — Growth (default)
 
-1. Compute **portfolio equity** at month *T* close (cash + marked positions).
-2. Update **peak equity** (running high watermark).
-3. **Drawdown %** = `(equity / peak - 1) × 100`.
-4. If drawdown **≤ −12%** → go to **Section D (risk-off)**. Skip B and C for this month.
+Code: `DEFAULT_REGIME_MOMENTUM_PARAMS` · Nifty 50 book backtest **~22% CAGR**, **~−19%** max DD (not a forecast).
 
-### B. Regime filter (benchmark)
+| Setting | Value |
+|---------|------:|
+| Top names | 5 |
+| 12–1 momentum | 12 / skip 1 |
+| Bench filter | Close ≥ SMA₁₂, 12m return ≥ **0%** |
+| Vol target (annual) | **18%** |
+| Gross cap | **100%** of equity (cash only, no margin) |
+| Leverage clip | 0.25 – 1.25 on vol scaler |
+| Max weight / name | **22%** |
+| Hard DD fuse | **−12%** from peak equity |
+| Soft DD fuse | **off** (0) |
 
-Using **NIFTYBEES** closes through month *T*:
+### B — Balanced (recommended if DD matters)
 
-1. **SMA₁₂** = average of last 12 month-end closes.
-2. **Bench 12m return** = `Close(T) / Close(T−12) − 1`.
-3. **Risk ON** only if **all** true:
-   - Drawdown fuse **not** triggered (Section A),
-   - `Close_NIFTYBEES(T) ≥ SMA₁₂`,
-   - `Bench 12m return ≥ 0%` (default).
+Code: `REGIME_MOMENTUM_NIFTY50_BALANCED_PARAMS` · Nifty 50 **~19.5% CAGR**, **~−14.5%** max DD.
 
-If **risk OFF** → **Section D**.  
-If **risk ON** → continue to **Section C**.
+| Setting | Value |
+|---------|------:|
+| Vol target | **14%** |
+| Gross cap | **95%** |
+| Max weight / name | **20%** |
+| Hard DD fuse | **−10%** |
+| Soft DD fuse | **−8%** → multiply this month’s gross by **0.5** |
 
-### C. Rebalance (risk on)
+### C — Fixed conservative (manual fixed sizing)
 
-#### C1. Eligible universe (liquidity & price)
+No vol scaler: fixed **equal weights** and fixed **gross %** of equity. Approximates backtest **~12.5% CAGR**, **~−10.5%** max DD with tight fuse.
 
-As of month *T* close, among all symbols with data:
+| Setting | Value |
+|---------|------:|
+| Top names | 5 |
+| Weights | **Equal** (20% of **deployed** sleeve each) |
+| Gross deployment | **50%** of month-*T* equity (do **not** vol-scale) |
+| Hard DD fuse | **−8%** |
+| Soft DD fuse | **−5%** → deploy **20%** of equity only (¼ of normal) |
 
-1. Exclude `NIFTYBEES` and any names in `universe_exclude_symbols`.
-2. Drop names with month *T* close **< ₹20**.
-3. For each remaining name, **median volume** = median of monthly volume over months **T−11 … T** (12 months).
-4. Keep the **top 200** names by median volume (rest dropped).
+### D — Avoid for most books: 3× margin
 
-#### C2. Momentum rank (12–1)
-
-For each eligible symbol:
-
-- **Momentum** = `Close(T−1) / Close(T−12) − 1`  
-  (i.e. 12-month return **excluding** the most recent month — “skip 1”).
-
-Rank descending. **Select top 5** symbols. Ties: prefer higher momentum; arbitrary tie-break is fine if equal.
-
-#### C3. Position weights (inverse volatility)
-
-Over months **T−11 … T**, compute each pick’s **monthly returns** (close-to-close).
-
-1. **σ₁₂** = stdev of monthly returns × √12 (annualized vol). If missing or zero, use **25%**.
-2. **Raw score** = `1 / max(σ₁₂, 8%)`.
-3. **Weight** = score / sum(scores), then **cap each name at 22%**, then **renormalize** so weights sum to 1.
-
-#### C4. Gross exposure (vol targeting)
-
-1. Over months **T−11 … T**, build **equal-weight** monthly returns across the 5 picks (average of the five stocks’ monthly returns).
-2. **Portfolio vol** = stdev of those monthly returns × √12. If invalid, use **20%**.
-3. **Leverage** = clip(`18% / portfolio vol`, 0.25, 1.25).
-4. **Gross deployment** = `min(leverage, 1.0) × portfolio equity at month *T* close`.
-
-*(Backtest deploys this fraction of equity; it does not use margin above 100% when `gross_cap` is 1.0.)*
-
-#### C5. Orders (month *T+1* open)
-
-1. **Sell all** current holdings at **month *T+1* open** (full rebalance).
-2. For each of the 5 picks, **target notional** = `gross deployment × weight`.
-3. **Buy** at **month *T+1* open**: `shares = target notional / open price` (integer shares if you trade physically; backtest uses fractional).
-4. **Unused cash** stays in cash (if opens are missing or notional exceeds cash, invest what you can — backtest caps each leg by available cash).
-
-**Hold** until the next month’s open rebalance (or until risk-off / fuse).
-
-### D. Risk-off (regime off or drawdown fuse)
-
-At **month *T+1* open**:
-
-1. **Sell all** positions into cash.
-2. Accrue **cash yield**: multiply cash by `(1 + 6%/12)` once for the month (model for idle cash; optional in live brokerage).
-
-Stay in cash until a future month passes **Section A** (fuse cleared — note: fuse is **not** auto-reset in code; it uses peak equity, so new highs reset drawdown) **and** **Section B** (regime ON).
+`REGIME_MOMENTUM_3X_PARAMS` — historical Nifty 50 run had **lower CAGR** and **~−33%** DD vs 1×. Use only if you run a dedicated margin risk sheet.
 
 ---
 
-## Execution notes (live vs backtest)
+## Monthly checklist (human)
 
-| Topic | Backtest | Live |
-|-------|----------|------|
-| **Prices** | Single monthly Open/Close per symbol | Use **opening auction / first print** on rebalance day |
-| **Partial fills** | Full fill at open | Use limit/MOO; review illiquid names in top 200 |
-| **Corporate actions** | Depends on your data vendor | Adjust shares for splits/bonus before signals |
-| **GST / charges** | Not modeled | Reduce effective `gross_cap` or add slippage buffer |
-| **Leverage** | Scales **deployed cash**, capped at 100% with default `gross_cap` | Same intent: size book to vol target without exceeding your margin rules |
+Run **once** after month *T* closes; place orders for month *T+1* **open**.
 
----
+### 1 — Book equity & drawdown
 
-## Quick reference formulas
+1. **Equity** = cash + MTM of all positions at **month *T* close**.
+2. **Peak** = max of all prior month-end equities (high watermark).
+3. **DD %** = `(equity / peak − 1) × 100`.
 
-**12–1 momentum (symbol *i*):**
+**Fuses (use your profile’s numbers):**
+
+- If **DD ≤ hard fuse** (e.g. −10% or −12%) → **Section 5 (risk-off)** only; skip picks.
+- Else if **DD ≤ soft fuse** (balanced: −8%) → still do regime + picks, but **halve gross deployment** (× 0.5).
+- Else → full sizing per profile.
+
+### 2 — Regime (NIFTYBEES)
+
+On month *T* close:
+
+1. **SMA₁₂** = mean of last 12 month-end closes.
+2. **R₁₂** = `Close(T) / Close(T−12) − 1`.
+3. **Regime ON** if: fuse allows **and** `Close ≥ SMA₁₂` **and** `R₁₂ ≥` bench floor (0% default; 3% in aggressive playbooks).
+
+If **OFF** → **Section 5**.
+
+### 3 — Universe (liquidity)
+
+Among symbols with data, as of *T*:
+
+1. Exclude benchmark and any `universe_exclude_symbols`.
+2. Drop if close **< ₹20**.
+3. **Median volume** = median of monthly volume over months *T−11 … T* (12m).
+4. Keep **top N** by median volume (default **N = 200**; Nifty-only: use 50-file list and skip step 4 or set N = 50).
+
+### 4 — Picks & weights (risk ON)
+
+#### 4a — 12–1 momentum rank
+
+For each universe name:
 
 ```
-mom_i = Close_i(T - 1 month) / Close_i(T - 12 months) - 1
+mom = Close(T − 1 month) / Close(T − 12 months) − 1
 ```
 
-**Inverse-vol weight (symbol *i* among picks):**
+Rank **descending**. Take **top 5**. (Optional: drop names with `mom < 0` if you use dual-momentum on names.)
+
+#### 4b — Weights
+
+**Growth / balanced (inverse vol):**
+
+1. For each pick, stdev of **monthly** returns over *T−11…T* × √12 → **σ**.
+2. Raw weight ∝ `1 / max(σ, 8%)`.
+3. Cap each at **20% or 22%** (profile), renormalize to sum to 1.
+
+**Fixed conservative:**
+
+- Weights = **20%** each of the **deployed** sleeve (equal).
+
+#### 4c — Gross deployment
+
+**Growth / balanced:**
+
+1. Equal-weight the 5 picks’ monthly returns over *T−11…T* → portfolio vol (annualized).
+2. **Scaler** = clip(`target_vol / portfolio_vol`, min_lev, max_lev).
+3. **Gross** = min(scaler, **gross_cap**) × equity at *T* close.
+4. Apply **soft fuse** scale (× 0.5) if applicable.
+
+**Fixed conservative:**
+
+- **Gross** = **50%** × equity at *T* close (× 0.25 if soft fuse on fixed profile).
+
+#### 4d — Orders at month *T+1* open
+
+1. **Sell all** positions at open (full rebalance).
+2. For each pick: **notional** = gross × weight.
+3. **Buy** at open: shares = notional / open (round to lot size on NSE).
+4. **Cash** = equity − sum(notionals) (minus costs in live).
+
+Hold until next month’s open rebalance (unless you exited via fuse).
+
+### 5 — Risk-off
+
+At *T+1* **open**:
+
+1. Flat all stocks.
+2. Stay in cash until **next** month: hard fuse no longer binding (new peak if equity recovers) **and** regime ON.
+
+Model uses ~**6% p.a.** on idle cash (optional in live).
+
+---
+
+## Worked example (balanced, ₹1,00,000 book)
+
+*Illustrative math only — use your own month-end prints.*
+
+| Step | Example |
+|------|---------|
+| Equity *T* close | ₹1,00,000 |
+| Peak | ₹1,08,000 |
+| DD | −7.4% → soft fuse **not** hit (threshold −8%) |
+| Regime | NIFTYBEES above SMA₁₂, 12m return +5% → **ON** |
+| Top 5 | Names A–E by 12–1 mom |
+| Weights after inv-vol cap | 18%, 22%, 20%, 22%, 18% |
+| Portfolio vol | 22% annual → scaler = 14/22 ≈ 0.64 |
+| Gross | min(0.64, 0.95) × 1,00,000 ≈ **₹64,000** |
+| Leg A | 0.18 × 64,000 = **₹11,520** at *T+1* open |
+
+Log: date, DD, regime, gross %, tickers, weights, orders, fills.
+
+---
+
+## Sanity checks
+
+- [ ] Signals use **completed** month *T* only.
+- [ ] **0 or 5** stocks in the risk-on sleeve (unless a symbol has no valid open — then cash residual).
+- [ ] No `NIFTYBEES` in stock sleeve.
+- [ ] Sum of weights on **deployed** sleeve = 100% (gross may be &lt; 100% of total equity).
+- [ ] Fuse state logged every month.
+
+---
+
+## Live vs backtest
+
+| Topic | Backtest | You |
+|-------|----------|-----|
+| Open | Monthly bar open | Opening price / MOO |
+| Costs | Not modeled | Deduct brokerage + STT; shave **0.1–0.2%**/leg buffer |
+| Splits | Vendor-adjusted | Fix share count before signals |
+| Partial fills | Full | Review illiquid names even in top 200 |
+
+---
+
+## Quick formulas
+
+**12–1 momentum:**
 
 ```
-w_i ∝ 1 / max(σ_i_12m_annual, 8%)
-w_i = min(w_i, 22%) then normalize
+mom_i = Close_i(T − 1m) / Close_i(T − 12m) − 1
 ```
 
-**Regime:**
+**Regime (default):**
 
 ```
-risk_on = (DD > -12%) AND (NIFTYBEES_close ≥ SMA12) AND (NIFTYBEES_12m_ret ≥ 0)
+risk_on = (DD > hard_fuse) AND (NIFTYBEES ≥ SMA12) AND (NIFTYBEES_12m ≥ 0)
+```
+
+**Inverse-vol weight:**
+
+```
+w_i ∝ 1 / max(σ_i, 8%);  w_i = min(w_i, w_max);  normalize
 ```
 
 ---
 
-## Sanity checks each month
-
-- [ ] Signal date is **last close of completed month**, not today’s intraday.
-- [ ] Exactly **0 or 5** stocks (never 1–4 unless a symbol has no open price — then cash residual).
-- [ ] No `NIFTYBEES` in the stock sleeve.
-- [ ] Weights after cap sum to **100%** of the **deployed** sleeve (not necessarily 100% of total equity if `gross_cap` & vol target imply less).
-- [ ] Log: regime on/off, fuse, picks, weights, gross %, trades.
-
----
-
-## Expected behavior (backtest context, not a forecast)
-
-On a broad NSE panel with universe filter (v1.3), historical simulations showed roughly **~19% CAGR** and **~−18% max drawdown** vs weak results without liquidity filtering. Past performance ≠ future results.
-
----
-
-## Disable or tune universe filter
-
-| Goal | Override |
-|------|----------|
-| Wider universe | Raise `universe_top_n_liquidity` or set `0` |
-| Stricter liquidity | Raise `universe_top_n_liquidity` floor via `universe_min_median_volume` |
-| Allow cheaper stocks | Lower `universe_min_close` |
-
-Pass overrides in notebook `REGIME_PARAMS` or script `params` dict; fingerprints include all default keys.
-
----
-
-## TradingView (Pine Script v5)
-
-Copy-paste: [`regime_momentum_tradingview_v5.pine`](regime_momentum_tradingview_v5.pine) (Pine **v6**, overlays price chart)
-
-- Chart timeframe **1 month**; paste script in Pine Editor.
-- **Teal line** = simulated 5-stock portfolio equity; **Strategy Tester** = regime long/flat on **NIFTYBEES** (proxy sizing).
-- Set **Universe 01–20** symbol inputs (Pine requires `input.symbol` — no dynamic CSV loops).
-- **Per-stock test:** Mode → **Chart symbol**, open e.g. `NSE:RELIANCE` on **1M**, enable overlay on price chart. Strategy Tester is long only when that symbol is in the monthly top-K vs the 20-slot universe (chart symbol auto-joins ranking if not already in the list).
-
-## Automation hook
-
-To reproduce picks without manual math:
+## Reproduce picks & ₹1L exports
 
 ```bash
-.venv/bin/python scripts/run_regime_momentum_full_universe.py
+# Signals / full universe backtest
+PYTHONPATH=src python scripts/run_regime_momentum_full_universe.py
+
+# ₹1L book trades + monthly returns (profiles: default | balanced | 3x)
+python scripts/simulate_regime_momentum_book_100k.py --profile balanced
+python scripts/simulate_regime_momentum_book_100k.py --all-profiles
 ```
 
-Outputs trades/equity via the same rules; use MCP monthly cache or your `QUANT_DATA_DIR` parquet panel.
+Exports:
+
+| File | Content |
+|------|---------|
+| `strategies/exports/nifty50_regime_momentum_book_100k_trades.csv` | Growth profile legs |
+| `strategies/exports/nifty50_regime_momentum_balanced_100k_trades.csv` | Balanced legs |
+| `strategies/exports/nifty50_regime_momentum_book_100k_monthly_returns.csv` | `Jan 2006` style book returns |
+
+Month-end scan (regime + SMA12, not this engine):
+
+```bash
+python scripts/scan_regime_sma12_monthly.py --mcp https://mcp.marketsenseanalytics.com
+```
+
+---
+
+## TradingView
+
+Monthly chart + overlay: [`regime_momentum_tradingview_v5.pine`](regime_momentum_tradingview_v5.pine)  
+Set universe symbol inputs to your Nifty 50 list; regime sleeve is NIFTYBEES long/flat proxy.
+
+---
+
+## Related docs
+
+| Doc | Use |
+|-----|-----|
+| [`month_hold_trade_rules.md`](month_hold_trade_rules.md) | Force **≤1 month** hold per leg |
+| [`target_2pct_monthly_playbook.md`](target_2pct_monthly_playbook.md) | Aggressive params — validate first |
+| [`regime_dual_mom_trade_rules.md`](regime_dual_mom_trade_rules.md) | Single-stock / futures |
+| [`regime_turn_trade_rules.md`](regime_turn_trade_rules.md) | **Early** tide entry (before full regime) |
+
+---
+
+## Backtest context (not a forecast)
+
+| Profile | Nifty 50 panel (approx.) |
+|---------|--------------------------|
+| Growth | ~22% CAGR, ~−19% max DD |
+| Balanced | ~19.5% CAGR, ~−14.5% max DD |
+| Fixed 50% + tight fuse | ~12.5% CAGR, ~−10.5% max DD |
+| 3× margin | ~15% CAGR, ~−33% max DD |
+
+Past performance ≠ future results. Prefer **drawdown control** and **regime filter** over leverage for this rule set.

@@ -8,13 +8,14 @@
 
 ## Best simple rule (from 2005→2025 monthly backtest)
 
-**Regime + trend stack** beat plain buy-and-hold, a 1-month momentum flip, and the full **institutional accumulation** engine on **RELIANCE alone**.
+**Regime + trend + 3-month momentum** is the preferred upgrade over plain **Regime + SMA12** (higher median CAGR, shallower drawdowns on Nifty 50). Full wording: [`regime_dual_mom_trade_rules.md`](regime_dual_mom_trade_rules.md).
 
 | Approach | Approx. CAGR | Approx. max DD |
 |----------|-------------:|---------------:|
 | Always long (cash bars) | ~16% | (worse in bears) |
 | Regime only (long / flat) | ~17% | ~−23% |
-| **Regime + RELIANCE > SMA12** | **~25%** | **~−18%** |
+| Regime + RELIANCE > SMA12 | ~25% | ~−18% |
+| **Regime + SMA12 + 3m mom > 0** | **~26%** | **~−14%** |
 | Institutional V4.9 (single name) | ~0.5% | ~−52% |
 
 Past performance is not a forecast. Futures leverage **scales P&amp;L and drawdowns**.
@@ -52,16 +53,19 @@ Use **NIFTYBEES** monthly (or Nifty future / Nifty index monthly).
 
 Matches spirit of `bench_sma_months=12`, `bench_min_momentum=0` in regime momentum.
 
-### 2. RELIANCE trend
+### 2. RELIANCE trend (+ momentum, recommended)
 
-**ON** when:
+**ON** when **all**:
 
 - `RELIANCE Close(T) > SMA12(RELIANCE Close)`
+- `Close(T) / Close(T−3m) − 1 > 0` (3-month momentum positive)
+
+SMA12-only is still valid but tends to **deeper drawdowns** on Nifty 50 medians.
 
 ### 3. Position
 
-| Regime | RELIANCE > SMA12 | Action |
-|:------:|:----------------:|--------|
+| Regime | Stock trend ON | Action |
+|:------:|:--------------:|--------|
 | OFF | — | **Flat** (no net long) |
 | ON | OFF | **Flat** |
 | ON | ON | **Long** near-month future (target book notional) |

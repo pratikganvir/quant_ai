@@ -64,6 +64,9 @@ DEFAULT_REGIME_MOMENTUM_PARAMS: dict[str, Any] = {
     # Margin: deploy may exceed cash (negative cash = borrow); monthly interest on debit balance.
     "margin_enabled": False,
     "borrow_rate_annual": 0.11,
+    # Add to 12-1 momentum score when multibagger setup fires (0 = off). See ``multibagger_signals``.
+    "thrust_rank_boost": 0.0,
+    "thrust_ret3_boost": 0.0,
 }
 
 # **Target** ~2%/month geometric (~27% CAGR) in strong bull regimes only — not every calendar month.
@@ -80,6 +83,39 @@ REGIME_MOMENTUM_TARGET_2PCT_MONTHLY_PARAMS: dict[str, Any] = {
     "dd_hard_stop_pct": 15.0,
     "dd_soft_stop_pct": 8.0,
     "dd_soft_gross_scale": 0.5,
+}
+
+# Nifty 50 panel (MCP monthly, 2025-11): Calmar-tilted vs default — ~19% CAGR, ~−14.5% max DD
+# (`scripts/compare_improved_regime_strategies.py`, vol target ↓ + dual drawdown fuse).
+REGIME_MOMENTUM_NIFTY50_BALANCED_PARAMS: dict[str, Any] = {
+    **DEFAULT_REGIME_MOMENTUM_PARAMS,
+    "bench_min_momentum": 0.0,
+    "target_vol_annual": 0.14,
+    "max_leverage": 1.15,
+    "min_leverage": 0.20,
+    "gross_cap": 0.95,
+    "top_k": 5,
+    "max_name_weight": 0.20,
+    "dd_hard_stop_pct": 10.0,
+    "dd_soft_stop_pct": 8.0,
+    "dd_soft_gross_scale": 0.5,
+    "min_name_momentum": 0.0,
+}
+
+# 3× margin book on regime_momentum (mirrors month_hold 3× gross semantics).
+REGIME_MOMENTUM_3X_PARAMS: dict[str, Any] = {
+    **DEFAULT_REGIME_MOMENTUM_PARAMS,
+    "margin_enabled": True,
+    "max_leverage": 3.0,
+    "gross_cap": 3.0,
+    "min_leverage": 0.5,
+    "target_vol_annual": 0.30,
+    "top_k": 5,
+    "max_name_weight": 0.22,
+    "dd_hard_stop_pct": 12.0,
+    "dd_soft_stop_pct": 6.0,
+    "dd_soft_gross_scale": 0.6,
+    "borrow_rate_annual": 0.11,
 }
 
 
@@ -205,6 +241,17 @@ def backtest_regime_momentum_portfolio(
     bench_sma = bench.rolling(sma_lb, min_periods=sma_lb).mean()
     bench_mom = bench / bench.shift(mom_lb) - 1.0
 
+    thrust_setup: pd.DataFrame | None = None
+    ret3_panel: pd.DataFrame | None = None
+    t_boost = float(p.get("thrust_rank_boost") or 0)
+    r3_boost = float(p.get("thrust_ret3_boost") or 0)
+    if t_boost > 0 or r3_boost > 0:
+        from quant.research.multibagger_signals import indicator_panels, precompute_setup_frame
+
+        thrust_setup = precompute_setup_frame(monthly, str(p["benchmark_symbol"]), p)
+        _, ind = indicator_panels(monthly, bench)
+        ret3_panel = ind["ret_3"]
+
     def mtm(d: pd.Timestamp) -> float:
         row = close.loc[d]
         total = cash
@@ -277,7 +324,15 @@ def backtest_regime_momentum_portfolio(
             equity_rows.append({"Date": d, "equity": mtm(d)})
             continue
 
-        picks = list(mom.nlargest(int(p["top_k"])).index)
+        score = mom.copy()
+        if thrust_setup is not None and t_boost > 0:
+            setup_row = thrust_setup.loc[d_prev].reindex(score.index)
+            score = score + setup_row.fillna(False).astype(float) * t_boost
+        if ret3_panel is not None and r3_boost > 0:
+            r3 = ret3_panel.loc[d_prev].reindex(score.index).fillna(0).clip(lower=0, upper=0.5)
+            score = score + r3 * r3_boost
+
+        picks = list(score.nlargest(int(p["top_k"])).index)
         vols = rets.loc[:d_prev].tail(vol_lb).std() * np.sqrt(12)
         inv: dict[str, float] = {}
         for sym in picks:

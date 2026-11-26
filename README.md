@@ -64,6 +64,9 @@ PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --max-symbols 100
 
 # Key ratios only (lighter; MCP GET /api/key-ratios/{symbol})
 ./scripts/sync_upstox_key_ratios.sh
+
+# Share-holdings only (MCP GET /api/share-holdings/{symbol})
+./scripts/sync_upstox_share_holdings.sh
 ```
 
 Upstox daily candles return at most **365 calendar days (inclusive) per API call**; sync uses maximum-width forward chunks and widens short gaps to a full year via `expand_fetch_window`. Override with `UPSTOX_DAILY_MAX_INCLUSIVE_DAYS` if needed.

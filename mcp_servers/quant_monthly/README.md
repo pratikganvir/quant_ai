@@ -40,6 +40,8 @@ Overrides: `QUANT_USER`, `QUANT_DATA_DIR`, `QUANT_PORT`, `QUANT_BIND` (see scrip
 | GET | `/api/fundamentals/{symbol}/{resource}` | Cached fundamentals (`profile`, `key-ratios`, …) |
 | GET | `/api/key-ratios/stocks` | Symbols with key-ratios cache (`?prefix=REL`) |
 | GET | `/api/key-ratios/{symbol}` | Key ratios only |
+| GET | `/api/share-holdings/stocks` | Symbols with share-holdings cache |
+| GET | `/api/share-holdings/{symbol}` | Share-holdings only |
 
 ## MCP tools
 
@@ -47,6 +49,7 @@ Overrides: `QUANT_USER`, `QUANT_DATA_DIR`, `QUANT_PORT`, `QUANT_BIND` (see scrip
 - `list_daily_stocks` / `get_daily_ohlcv` — daily
 - `list_fundamentals_stocks` / `get_fundamentals` — fundamentals (populate via `scripts/sync_upstox_fundamentals.py`)
 - `list_key_ratios_stocks` / `get_key_ratios` — key-ratios only (`scripts/sync_upstox_key_ratios.sh`)
+- `list_share_holdings_stocks` / `get_share_holdings` — share-holdings (`scripts/sync_upstox_share_holdings.sh`)
 
 ### Sync fundamentals (Upstox API)
 
@@ -55,6 +58,7 @@ PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --symbol RELIANCE
 PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --max-symbols 50
 ./scripts/sync_upstox_fundamentals_all.sh
 ./scripts/sync_upstox_key_ratios.sh
+./scripts/sync_upstox_share_holdings.sh
 PYTHONPATH=src python scripts/sync_upstox_fundamentals.py --resources profile,key-ratios
 ```
 

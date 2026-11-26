@@ -7,8 +7,10 @@ from pathlib import Path
 from quant.data.fundamentals_cache import (
     get_fundamentals,
     get_key_ratios,
+    get_share_holdings,
     list_stocks_with_fundamentals,
     list_stocks_with_key_ratios,
+    list_stocks_with_share_holdings,
 )
 from quant.data.upstox import write_json_cache
 from quant.data.upstox_fundamentals import (
@@ -57,3 +59,11 @@ def test_fundamentals_roundtrip_cache(tmp_path: Path):
     )
     assert list_stocks_with_key_ratios(cache_dir=tmp_path)[0].symbol == sym
     assert get_key_ratios(sym, cache_dir=tmp_path)["data"]["pe"] == 12.5
+
+    sh_path = symbol_fundamental_path(sym, "share-holdings", cache_dir=tmp_path)
+    write_json_cache(
+        sh_path,
+        {"status": "success", "data": {"promoter": 0.5}, "_meta": {"isin": "INE002A01018"}},
+    )
+    assert list_stocks_with_share_holdings(cache_dir=tmp_path)[0].symbol == sym
+    assert get_share_holdings(sym, cache_dir=tmp_path)["data"]["promoter"] == 0.5

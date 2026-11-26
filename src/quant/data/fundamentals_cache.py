@@ -38,6 +38,24 @@ def list_stocks_with_key_ratios(
     return [r for r in rows if "key-ratios" in r.resources]
 
 
+def get_share_holdings(
+    symbol: str,
+    *,
+    cache_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Cached Upstox share-holdings for one symbol."""
+    return get_fundamentals(symbol, "share-holdings", cache_dir=cache_dir)
+
+
+def list_stocks_with_share_holdings(
+    *,
+    cache_dir: Path | None = None,
+    symbols: Iterable[str] | None = None,
+) -> list[FundamentalsCoverage]:
+    rows = list_fundamentals_coverage(cache_dir=cache_dir or UPSTOX_CACHE_DIR, symbols=symbols)
+    return [r for r in rows if "share-holdings" in r.resources]
+
+
 def get_fundamentals(
     symbol: str,
     resource: str,
